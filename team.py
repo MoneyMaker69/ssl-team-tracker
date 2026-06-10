@@ -28,6 +28,21 @@ ORG_MAPPING = {
     "Liffeyside Celtic FC": {"Major": "Liffeyside Celtic FC", "Minor": "CS Rova Mpanjaka"}
 }
 
+SHEET_TO_API_MAPPING = {
+    "Club Atlètico Buenos Aires": "CA Buenos Aires",
+    "Hollywood Football Club": "Hollywood FC",
+    "Athletice Clava Romana": "A.C. Romana",
+    "Reykjavik United": "Reykjavik United",
+    "Shanghai Dragons": "Shanghai Dragons FC",
+    "Xelajú Cósmico Fùtbol Club": "Xelajú Cósmico FC",
+    "Tokyo Sports Club": "Tokyo S.C.",
+    "Club de Futbol Catalunya": "CF Catalunya",
+    "União São Paulo": "União São Paulo",
+    "Schwarzwälder Fußballverein": "Schwarzwälder FV",
+    "Club Deportivo Tenochtitlan": "CD Tenochtitlan",
+    "Liffeyside Celtic Football Club": "Liffeyside Celtic FC"
+}
+
 TEAM_TO_ORG = {}
 for org, teams in ORG_MAPPING.items():
     TEAM_TO_ORG[teams["Major"]] = {"org": org, "type": "Major"}
@@ -49,7 +64,7 @@ CORE_ATTRIBUTES = [
 ]
 
 # -----------------------------------------------------------------------------
-# 2. DATA CACHING & PROCESSING
+# 2. DATA CACHING & PROCESSING (API)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_and_process_data():
@@ -65,12 +80,10 @@ def load_and_process_data():
     df['tpe'] = pd.to_numeric(df['tpe'], errors='coerce').fillna(0)
     df['bankBalance'] = pd.to_numeric(df['bankBalance'], errors='coerce').fillna(0)
     
-    # Map teams to Orgs
     df['assigned_org'] = df['team'].apply(lambda x: TEAM_TO_ORG.get(x, {}).get('org', 'Unknown'))
     df['league_tier'] = df['team'].apply(lambda x: TEAM_TO_ORG.get(x, {}).get('type', 'Unknown'))
     df = df[df['assigned_org'] != 'Unknown']
     
-    # Extract season number for Age Tracking (e.g. "S13" -> 13.0)
     df['season_num'] = df['class'].astype(str).str.extract(r'(\d+)').astype(float)
     df['timesregressed'] = pd.to_numeric(df['timesregressed'], errors='coerce').fillna(0)
     
@@ -79,11 +92,86 @@ def load_and_process_data():
 df_players = load_and_process_data()
 
 if df_players.empty:
-    st.warning("No data available to display.")
+    st.warning("No data available to display from the API.")
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 3. GLOBAL SIDEBAR FILTERS
+# 3. GOOGLE SHEETS INTEGRATION
+# -----------------------------------------------------------------------------
+SPREADSHEET_ID = "1dlJLL85csDV8HXaig8dtZQNgmG9YeAJSS3eeM-nhocA"
+LEADERBOARD_GID = "1702210962" 
+
+@st.cache_data(ttl=600)
+def load_google_sheet(gid):
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv&gid={gid}"
+        df = pd.read_csv(url)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+df_leaderboard = load_google_sheet(LEADERBOARD_GID)
+
+# -----------------------------------------------------------------------------
+# 3.5 THE TABLE HUNTER (Extracts Historical Data for Tabs 7 & 8)
+# -----------------------------------------------------------------------------
+history_df = pd.DataFrame()
+tpe_name = 'TPE'
+
+if not df_leaderboard.empty:
+    team_idx, season_idx, tpe_idx = -1, -1, -1
+    found_start_row = -1
+    
+    for index, row in df_leaderboard.iterrows():
+        row_vals = [str(x).strip().lower() for x in row.values]
+        
+        if 'top xi avg' in row_vals:
+            tpe_idx = row_vals.index('top xi avg')
+            for i in range(tpe_idx - 1, -1, -1):
+                if row_vals[i] == 'season' and season_idx == -1: season_idx = i
+                elif row_vals[i] == 'team' and team_idx == -1: team_idx = i
+            
+            if team_idx != -1 and season_idx != -1:
+                tpe_name = 'Top XI Avg TPE'
+                found_start_row = index
+                break
+                
+        elif 'avg tpe' in row_vals:
+            tpe_idx = row_vals.index('avg tpe')
+            for i in range(tpe_idx - 1, -1, -1):
+                if row_vals[i] == 'season' and season_idx == -1: season_idx = i
+                elif row_vals[i] == 'team' and team_idx == -1: team_idx = i
+                    
+            if team_idx != -1 and season_idx != -1:
+                tpe_name = 'Avg TPE'
+                found_start_row = index
+                break
+    
+    if found_start_row != -1:
+        extracted_data = []
+        for i in range(found_start_row + 1, len(df_leaderboard)):
+            data_row = df_leaderboard.iloc[i]
+            try:
+                team_val = data_row.iloc[team_idx]
+                season_val = data_row.iloc[season_idx]
+                tpe_val = data_row.iloc[tpe_idx]
+                
+                if pd.notna(team_val) and str(team_val).strip() != '' and str(team_val).strip().lower() != 'team':
+                    extracted_data.append({'Team': team_val, 'Season': season_val, 'TPE_Value': tpe_val})
+            except IndexError:
+                continue
+        
+        history_df = pd.DataFrame(extracted_data)
+        history_df['TPE_Value'] = pd.to_numeric(history_df['TPE_Value'], errors='coerce')
+        history_df['Season'] = pd.to_numeric(history_df['Season'], errors='coerce')
+        history_df = history_df.dropna(subset=['Season', 'TPE_Value'])
+        
+        # Map to API Names
+        if not history_df.empty:
+            history_df['API_Team'] = history_df['Team'].map(SHEET_TO_API_MAPPING).fillna(history_df['Team'])
+
+# -----------------------------------------------------------------------------
+# 4. GLOBAL SIDEBAR FILTERS
 # -----------------------------------------------------------------------------
 st.sidebar.header("Global Filters")
 
@@ -105,7 +193,7 @@ if roster_filter == "Top 11 Players (Starting XI)":
     df_active = df_active.sort_values(by='tpe', ascending=False).groupby(group_col).head(11).reset_index(drop=True)
 
 # -----------------------------------------------------------------------------
-# 4. HELPER FUNCTIONS
+# 5. HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
 def build_positional_matrix(df_scope, metric, g_col):
     entities = df_scope[g_col].unique()
@@ -144,21 +232,22 @@ def calculate_positional_averages(df_scope, metric):
     return pd.DataFrame(pos_data).T
 
 # -----------------------------------------------------------------------------
-# 5. MAIN INTERFACE TABS
+# 6. MAIN INTERFACE TABS
 # -----------------------------------------------------------------------------
-tab_overview, tab_lifecycle, tab_matrix, tab_finance, tab_roster, tab_h2h = st.tabs([
+tab_overview, tab_lifecycle, tab_matrix, tab_finance, tab_roster, tab_h2h, tab_history, tab_leaderboard = st.tabs([
     "📊 League Overview", 
     "⏳ Lifecycle Quadrants",
     "🧮 Positional TPE Matrix", 
     "💰 Financial Analysis",
     "📋 Team Deep Dive", 
-    "⚔️ Head-to-Head"
+    "⚔️ Head-to-Head",
+    "📈 Historical Trends",
+    "🏆 Live Leaderboard & Peaks"
 ])
 
 # --- TAB 1: LEAGUE OVERVIEW ---
 with tab_overview:
     st.header(f"League-Wide TPE Distribution ({roster_filter})")
-    
     team_order = df_active.groupby(group_col)['tpe'].mean().sort_values(ascending=False).index.tolist()
     fig_scatter = px.scatter(
         df_active, x=group_col, y='tpe', color=group_col,
@@ -173,80 +262,31 @@ with tab_overview:
 # --- TAB 2: LIFECYCLE QUADRANTS ---
 with tab_lifecycle:
     st.header(f"Team Lifecycle & Development ({roster_filter})")
-    st.markdown("""
-    This map shows exactly where each roster sits in its competitive window. 
-    * **X-Axis:** Average Draft Class. (Reversed so older classes are on the right).
-    * **Y-Axis:** Current TPE levels.
-    """)
-    
-    # Calculate Team/Org Averages for TPE and Season Class
-    lifecycle_df = df_active.groupby(group_col).agg(
-        Avg_TPE=('tpe', 'mean' if metric_toggle == "Average" else 'sum'),
-        Avg_Season=('season_num', 'mean')
-    ).dropna().reset_index()
+    st.markdown("X-Axis: Average Draft Class (Older on right) | Y-Axis: Current TPE.")
+    lifecycle_df = df_active.groupby(group_col).agg(Avg_TPE=('tpe', 'mean' if metric_toggle == "Average" else 'sum'), Avg_Season=('season_num', 'mean')).dropna().reset_index()
 
     if not lifecycle_df.empty:
-        # Medians for the quadrant crosshairs
         med_tpe = lifecycle_df['Avg_TPE'].median()
         med_season = lifecycle_df['Avg_Season'].median()
-        
-        fig_quad = px.scatter(
-            lifecycle_df, x='Avg_Season', y='Avg_TPE',
-            text=group_col, color=group_col,
-            title=f"Competitive Matrix ({metric_toggle} TPE vs. Roster Age)",
-            labels={'Avg_Season': 'Average Draft Class (Lower Number = Older)', 'Avg_TPE': f'{metric_toggle} TPE'}
-        )
-        
-        # Reverse X-Axis so older players (lower class numbers) are on the right
+        fig_quad = px.scatter(lifecycle_df, x='Avg_Season', y='Avg_TPE', text=group_col, color=group_col)
         fig_quad.update_xaxes(autorange="reversed")
-        
-        # Quadrant Lines
         fig_quad.add_hline(y=med_tpe, line_dash="dash", line_color="rgba(255,255,255,0.3)")
         fig_quad.add_vline(x=med_season, line_dash="dash", line_color="rgba(255,255,255,0.3)")
-        
-        # Quadrant Text Annotations
-        # Because the X-axis is reversed, Left is higher season (Younger), Right is lower season (Older)
-        fig_quad.add_annotation(x=0.05, y=0.95, xref="paper", yref="paper", text="🌟 Ideal (Young, High TPE)", showarrow=False, font=dict(color="#00cc96", size=14))
-        fig_quad.add_annotation(x=0.95, y=0.95, xref="paper", yref="paper", text="⚔️ Competing (Old, High TPE)", showarrow=False, font=dict(color="#636efa", size=14))
-        fig_quad.add_annotation(x=0.05, y=0.05, xref="paper", yref="paper", text="🏗️ Rebuilding (Young, Low TPE)", showarrow=False, font=dict(color="#ffa15a", size=14))
-        fig_quad.add_annotation(x=0.95, y=0.05, xref="paper", yref="paper", text="⚠️ Danger Zone (Old, Low TPE)", showarrow=False, font=dict(color="#ef553b", size=14))
-        
-        fig_quad.update_traces(textposition='top center', marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
+        fig_quad.update_traces(textposition='top center', marker=dict(size=12))
         fig_quad.update_layout(showlegend=False, height=600)
-        
         st.plotly_chart(fig_quad, use_container_width=True)
-    else:
-        st.warning("Not enough draft class data to generate lifecycle matrix.")
 
 # --- TAB 3: POSITIONAL MATRIX ---
 with tab_matrix:
     st.header(f"Positional Breakdown ({metric_toggle} TPE)")
-    st.markdown(f"*Currently viewing: {group_mode} | {tier_filter} | {roster_filter}*")
-    
     matrix_df = build_positional_matrix(df_active, metric_toggle, group_col)
-    
-    st.dataframe(
-        matrix_df.style.format(precision=1).background_gradient(cmap='viridis', subset=matrix_df.columns[1:]),
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(matrix_df.style.format(precision=1).background_gradient(cmap='viridis', subset=matrix_df.columns[1:]), use_container_width=True, hide_index=True)
 
 # --- TAB 4: FINANCIALS ---
 with tab_finance:
     st.header("Financial Overview")
-    
-    league_summary = df_active.groupby(group_col).agg(
-        Total_Bank=('bankBalance', 'sum'),
-        Avg_Bank=('bankBalance', 'mean')
-    ).round(0).reset_index()
-
-    fig_bank = px.bar(
-        league_summary.sort_values(by="Total_Bank" if metric_toggle == "Total" else "Avg_Bank", ascending=False),
-        x=group_col, y="Total_Bank" if metric_toggle == "Total" else "Avg_Bank",
-        text="Total_Bank" if metric_toggle == "Total" else "Avg_Bank",
-        title=f"Wealth Distribution ({metric_toggle} Bank Balance)",
-        labels={"Total_Bank": "Total Combined Bank", "Avg_Bank": "Average Bank Balance", group_col: "Entity"}
-    )
+    league_summary = df_active.groupby(group_col).agg(Total_Bank=('bankBalance', 'sum'), Avg_Bank=('bankBalance', 'mean')).round(0).reset_index()
+    fig_bank = px.bar(league_summary.sort_values(by="Total_Bank" if metric_toggle == "Total" else "Avg_Bank", ascending=False), x=group_col, y="Total_Bank" if metric_toggle == "Total" else "Avg_Bank", text="Total_Bank" if metric_toggle == "Total" else "Avg_Bank")
     fig_bank.update_traces(texttemplate='€%{text:,.0f}', textposition='outside')
     fig_bank.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig_bank, use_container_width=True)
@@ -256,71 +296,102 @@ with tab_roster:
     st.header("Individual Roster Deep Dive")
     all_entities_filtered = sorted([t for t in df_active[group_col].unique() if t])
     selected_target = st.selectbox("Select Entity to Inspect", all_entities_filtered)
-    
     df_team_specific = df_active[df_active[group_col] == selected_target]
-    
     col_left, col_right = st.columns([1, 2])
     with col_left:
-        st.subheader(f"Positional Depth ({metric_toggle})")
         pos_df = calculate_positional_averages(df_team_specific, metric_toggle)
         st.dataframe(pos_df, use_container_width=True)
-        
-        # Mini Age Metric
-        avg_season = df_team_specific['season_num'].mean()
-        regressing = len(df_team_specific[df_team_specific['timesregressed'] > 0])
-        st.metric("Avg Draft Class", f"S{avg_season:.1f}")
-        st.metric("Players in Regression", regressing, delta="Danger" if regressing >= 3 else "Stable", delta_color="inverse")
-        
     with col_right:
-        st.subheader("Core Attribute Profile (Roster Averages)")
         attr_means = df_team_specific[CORE_ATTRIBUTES].mean().round(2).reset_index()
         attr_means.columns = ['Attribute', 'Average Value']
-        
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(r=attr_means['Average Value'], theta=attr_means['Attribute'], fill='toself', name=selected_target))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 20])), showlegend=False, margin=dict(l=40, r=40, t=40, b=40))
+        fig_radar = go.Figure(go.Scatterpolar(r=attr_means['Average Value'], theta=attr_means['Attribute'], fill='toself'))
         st.plotly_chart(fig_radar, use_container_width=True)
-
-    st.subheader(f"Active Players ({roster_filter})")
-    st.dataframe(
-        df_team_specific[['name', 'team', 'class', 'position', 'tpe', 'bankBalance', 'timesregressed']],
-        use_container_width=True,
-        hide_index=True
-    )
 
 # --- TAB 6: HEAD-TO-HEAD ---
 with tab_h2h:
     st.header(f"⚔️ Tactical Matchup ({metric_toggle})")
-    
     col_sel1, col_sel2 = st.columns(2)
-    with col_sel1:
-        team_a = st.selectbox("Select Blue Corner", all_entities_filtered, index=0)
-    with col_sel2:
-        team_b = st.selectbox("Select Red Corner", all_entities_filtered, index=min(1, len(all_entities_filtered)-1))
+    with col_sel1: team_a = st.selectbox("Select Blue Corner", all_entities_filtered, index=0)
+    with col_sel2: team_b = st.selectbox("Select Red Corner", all_entities_filtered, index=min(1, len(all_entities_filtered)-1))
+
+# --- TAB 7: HISTORICAL TRENDS ---
+with tab_history:
+    st.header("📈 Historical Franchise Momentum")
+    if not history_df.empty:
+        all_teams = history_df['API_Team'].dropna().unique().tolist()
+        default_selection = all_teams[:4] if len(all_teams) >= 4 else all_teams
+        selected_teams = st.multiselect("Select Franchises to Compare:", all_teams, default=default_selection)
         
-    df_a = df_active[df_active[group_col] == team_a]
-    df_b = df_active[df_active[group_col] == team_b]
+        if selected_teams:
+            filtered_history = history_df[history_df['API_Team'].isin(selected_teams)].sort_values(by='Season')
+            fig_timeline = px.line(
+                filtered_history, x='Season', y='TPE_Value', color='API_Team', markers=True,
+                title=f"Timeline of Roster Growth ({tpe_name})",
+                labels={"Season": "League Season", "TPE_Value": "Historical TPE", "API_Team": "Franchise"}
+            )
+            fig_timeline.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_timeline, use_container_width=True)
+        else:
+            st.info("Please select at least one team from the dropdown above.")
+    else:
+        st.warning("Could not locate the historical data table inside the Google Sheet.")
+
+# --- TAB 8: LIVE LEADERBOARD & DOT CHART ---
+with tab_leaderboard:
+    st.header("🏆 Live Power Rankings & Peak Distribution")
     
-    pos_a = calculate_positional_averages(df_a, metric_toggle)
-    pos_b = calculate_positional_averages(df_b, metric_toggle)
+    current_top11_avg = df_players[df_players['league_tier'] == 'Major'].sort_values(by='tpe', ascending=False).groupby('team').head(11).groupby('team')['tpe'].mean().round(1).reset_index()
+    current_top11_avg.rename(columns={'team': 'API_Team', 'tpe': 'Current Top 11 Avg TPE'}, inplace=True)
     
-    comparison_df = pd.DataFrame({
-        f"{team_a} {metric_toggle} TPE": pos_a[f"{metric_toggle} TPE"],
-        f"{team_a} Count": pos_a["Count"],
-        f"{team_b} {metric_toggle} TPE": pos_b[f"{metric_toggle} TPE"],
-        f"{team_b} Count": pos_b["Count"]
-    })
+    # 1. THE TOP 5 PODIUM
+    st.subheader("Current Top 5 Roster Rankings (Starting XI)")
+    top_5 = current_top11_avg.sort_values(by='Current Top 11 Avg TPE', ascending=False).head(5).reset_index(drop=True)
     
-    st.subheader("Side-by-Side Positional Breakdown")
-    st.dataframe(comparison_df, use_container_width=True)
+    cols = st.columns(5)
+    for i, row in top_5.iterrows():
+        with cols[i]:
+            st.metric(label=f"Rank #{i+1}: {row['API_Team']}", value=f"{row['Current Top 11 Avg TPE']} TPE")
+            
+    st.markdown("---")
+
+    # 2. THE DOT CHART (STRIP PLOT)
+    st.subheader("Historical Spread (Every Season Played)")
+    st.markdown("*Each dot represents a completed season. A tight cluster at the top indicates a consistent powerhouse. A wide vertical spread indicates extreme rebuilds and peaks.*")
     
-    st.subheader("Direct Attribute Overlay")
-    attr_a = df_a[CORE_ATTRIBUTES].mean().round(2)
-    attr_b = df_b[CORE_ATTRIBUTES].mean().round(2)
-    
-    fig_h2h_radar = go.Figure()
-    fig_h2h_radar.add_trace(go.Scatterpolar(r=attr_a.values, theta=CORE_ATTRIBUTES, fill='toself', name=team_a, fillcolor='rgba(31, 119, 180, 0.2)', line=dict(color='blue')))
-    fig_h2h_radar.add_trace(go.Scatterpolar(r=attr_b.values, theta=CORE_ATTRIBUTES, fill='toself', name=team_b, fillcolor='rgba(214, 39, 40, 0.2)', line=dict(color='red')))
-    
-    fig_h2h_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 20])))
-    st.plotly_chart(fig_h2h_radar, use_container_width=True)
+    if not history_df.empty:
+        # Sort the X-axis by the team's highest ever TPE so the graph looks organized left-to-right
+        order = history_df.groupby('API_Team')['TPE_Value'].max().sort_values(ascending=False).index
+        
+        # px.strip creates a beautiful jittered dot plot
+        fig_dots = px.strip(
+            history_df,
+            x='API_Team',
+            y='TPE_Value',
+            color='API_Team',
+            hover_data=['Season'],
+            title=f"Density of Franchise Success ({tpe_name})",
+            labels={'API_Team': 'Franchise', 'TPE_Value': 'TPE'},
+            category_orders={'API_Team': order}
+        )
+        
+        # Make the dots slightly bigger and spread them out a bit so they don't overlap completely
+        fig_dots.update_traces(marker=dict(size=8, opacity=0.7), jitter=0.6)
+        fig_dots.update_layout(xaxis_tickangle=-45, showlegend=False)
+        st.plotly_chart(fig_dots, use_container_width=True)
+    else:
+        st.warning("Historical data could not be loaded for the dot chart.")
+
+    # 3. THE HISTORICAL LEADERBOARD
+    st.markdown("---")
+    st.subheader("All-Time Peak Leaderboard")
+    if not df_leaderboard.empty:
+        clean_leaderboard = df_leaderboard[['Team', 'Peak Top XI Avg TPE', 'Peak XI Season']].dropna(subset=['Team']).copy()
+        clean_leaderboard['API_Team'] = clean_leaderboard['Team'].map(SHEET_TO_API_MAPPING)
+        
+        if 'Peak Top XI Avg TPE' in clean_leaderboard.columns:
+            display_df = pd.merge(current_top11_avg, clean_leaderboard, on='API_Team', how='inner')
+            display_df['Peak Top XI Avg TPE'] = pd.to_numeric(display_df['Peak Top XI Avg TPE'], errors='coerce')
+            
+            # Sort by who has the highest all-time peak
+            display_df = display_df[['API_Team', 'Current Top 11 Avg TPE', 'Peak Top XI Avg TPE', 'Peak XI Season']].sort_values(by='Peak Top XI Avg TPE', ascending=False)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
