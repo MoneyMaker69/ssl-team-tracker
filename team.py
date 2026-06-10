@@ -96,7 +96,7 @@ if df_players.empty:
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 3. GOOGLE SHEETS INTEGRATION
+# 3. GOOGLE SHEETS INTEGRATION & TABLE HUNTER
 # -----------------------------------------------------------------------------
 SPREADSHEET_ID = "1dlJLL85csDV8HXaig8dtZQNgmG9YeAJSS3eeM-nhocA"
 LEADERBOARD_GID = "1702210962" 
@@ -112,9 +112,6 @@ def load_google_sheet(gid):
 
 df_leaderboard = load_google_sheet(LEADERBOARD_GID)
 
-# -----------------------------------------------------------------------------
-# 3.5 THE TABLE HUNTER (Extracts Historical Data for Tabs 7 & 8)
-# -----------------------------------------------------------------------------
 history_df = pd.DataFrame()
 tpe_name = 'TPE'
 
@@ -166,7 +163,6 @@ if not df_leaderboard.empty:
         history_df['Season'] = pd.to_numeric(history_df['Season'], errors='coerce')
         history_df = history_df.dropna(subset=['Season', 'TPE_Value'])
         
-        # Map to API Names
         if not history_df.empty:
             history_df['API_Team'] = history_df['Team'].map(SHEET_TO_API_MAPPING).fillna(history_df['Team'])
 
@@ -191,6 +187,9 @@ else:
 
 if roster_filter == "Top 11 Players (Starting XI)":
     df_active = df_active.sort_values(by='tpe', ascending=False).groupby(group_col).head(11).reset_index(drop=True)
+
+# List used for dropdowns in tabs 5 and 6
+all_entities_filtered = sorted([str(t) for t in df_active[group_col].dropna().unique() if str(t).strip() != ''])
 
 # -----------------------------------------------------------------------------
 # 5. HELPER FUNCTIONS
@@ -294,25 +293,58 @@ with tab_finance:
 # --- TAB 5: DETAILED ROSTER ANALYSIS ---
 with tab_roster:
     st.header("Individual Roster Deep Dive")
-    all_entities_filtered = sorted([t for t in df_active[group_col].unique() if t])
-    selected_target = st.selectbox("Select Entity to Inspect", all_entities_filtered)
-    df_team_specific = df_active[df_active[group_col] == selected_target]
-    col_left, col_right = st.columns([1, 2])
-    with col_left:
-        pos_df = calculate_positional_averages(df_team_specific, metric_toggle)
-        st.dataframe(pos_df, use_container_width=True)
-    with col_right:
-        attr_means = df_team_specific[CORE_ATTRIBUTES].mean().round(2).reset_index()
-        attr_means.columns = ['Attribute', 'Average Value']
-        fig_radar = go.Figure(go.Scatterpolar(r=attr_means['Average Value'], theta=attr_means['Attribute'], fill='toself'))
-        st.plotly_chart(fig_radar, use_container_width=True)
+    if len(all_entities_filtered) > 0:
+        selected_target = st.selectbox("Select Entity to Inspect", all_entities_filtered)
+        df_team_specific = df_active[df_active[group_col] == selected_target]
+        col_left, col_right = st.columns([1, 2])
+        with col_left:
+            pos_df = calculate_positional_averages(df_team_specific, metric_toggle)
+            st.dataframe(pos_df, use_container_width=True)
+        with col_right:
+            attr_means = df_team_specific[CORE_ATTRIBUTES].mean().round(2).reset_index()
+            attr_means.columns = ['Attribute', 'Average Value']
+            fig_radar = go.Figure(go.Scatterpolar(r=attr_means['Average Value'], theta=attr_means['Attribute'], fill='toself'))
+            st.plotly_chart(fig_radar, use_container_width=True)
+    else:
+        st.info("No entities available for current filters.")
 
 # --- TAB 6: HEAD-TO-HEAD ---
 with tab_h2h:
     st.header(f"⚔️ Tactical Matchup ({metric_toggle})")
-    col_sel1, col_sel2 = st.columns(2)
-    with col_sel1: team_a = st.selectbox("Select Blue Corner", all_entities_filtered, index=0)
-    with col_sel2: team_b = st.selectbox("Select Red Corner", all_entities_filtered, index=min(1, len(all_entities_filtered)-1))
+    if len(all_entities_filtered) > 1:
+        col_sel1, col_sel2 = st.columns(2)
+        with col_sel1: 
+            team_a = st.selectbox("Select Blue Corner", all_entities_filtered, index=0)
+        with col_sel2: 
+            team_b = st.selectbox("Select Red Corner", all_entities_filtered, index=min(1, len(all_entities_filtered)-1))
+            
+        df_a = df_active[df_active[group_col] == team_a]
+        df_b = df_active[df_active[group_col] == team_b]
+        
+        pos_a = calculate_positional_averages(df_a, metric_toggle)
+        pos_b = calculate_positional_averages(df_b, metric_toggle)
+        
+        comparison_df = pd.DataFrame({
+            f"{team_a} {metric_toggle} TPE": pos_a[f"{metric_toggle} TPE"],
+            f"{team_a} Count": pos_a["Count"],
+            f"{team_b} {metric_toggle} TPE": pos_b[f"{metric_toggle} TPE"],
+            f"{team_b} Count": pos_b["Count"]
+        })
+        
+        st.subheader("Side-by-Side Positional Breakdown")
+        st.dataframe(comparison_df, use_container_width=True)
+        
+        st.subheader("Direct Attribute Overlay")
+        attr_a = df_a[CORE_ATTRIBUTES].mean().round(2)
+        attr_b = df_b[CORE_ATTRIBUTES].mean().round(2)
+        
+        fig_h2h_radar = go.Figure()
+        fig_h2h_radar.add_trace(go.Scatterpolar(r=attr_a.values, theta=CORE_ATTRIBUTES, fill='toself', name=team_a, fillcolor='rgba(31, 119, 180, 0.2)', line=dict(color='blue')))
+        fig_h2h_radar.add_trace(go.Scatterpolar(r=attr_b.values, theta=CORE_ATTRIBUTES, fill='toself', name=team_b, fillcolor='rgba(214, 39, 40, 0.2)', line=dict(color='red')))
+        fig_h2h_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 20])))
+        st.plotly_chart(fig_h2h_radar, use_container_width=True)
+    else:
+        st.info("Not enough entities to compare based on your current filters.")
 
 # --- TAB 7: HISTORICAL TRENDS ---
 with tab_history:
@@ -359,22 +391,13 @@ with tab_leaderboard:
     st.markdown("*Each dot represents a completed season. A tight cluster at the top indicates a consistent powerhouse. A wide vertical spread indicates extreme rebuilds and peaks.*")
     
     if not history_df.empty:
-        # Sort the X-axis by the team's highest ever TPE so the graph looks organized left-to-right
         order = history_df.groupby('API_Team')['TPE_Value'].max().sort_values(ascending=False).index
-        
-        # px.strip creates a beautiful jittered dot plot
         fig_dots = px.strip(
-            history_df,
-            x='API_Team',
-            y='TPE_Value',
-            color='API_Team',
-            hover_data=['Season'],
+            history_df, x='API_Team', y='TPE_Value', color='API_Team', hover_data=['Season'],
             title=f"Density of Franchise Success ({tpe_name})",
             labels={'API_Team': 'Franchise', 'TPE_Value': 'TPE'},
             category_orders={'API_Team': order}
         )
-        
-        # Make the dots slightly bigger and spread them out a bit so they don't overlap completely
         fig_dots.update_traces(marker=dict(size=8, opacity=0.7), jitter=0.6)
         fig_dots.update_layout(xaxis_tickangle=-45, showlegend=False)
         st.plotly_chart(fig_dots, use_container_width=True)
@@ -391,7 +414,5 @@ with tab_leaderboard:
         if 'Peak Top XI Avg TPE' in clean_leaderboard.columns:
             display_df = pd.merge(current_top11_avg, clean_leaderboard, on='API_Team', how='inner')
             display_df['Peak Top XI Avg TPE'] = pd.to_numeric(display_df['Peak Top XI Avg TPE'], errors='coerce')
-            
-            # Sort by who has the highest all-time peak
             display_df = display_df[['API_Team', 'Current Top 11 Avg TPE', 'Peak Top XI Avg TPE', 'Peak XI Season']].sort_values(by='Peak Top XI Avg TPE', ascending=False)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
