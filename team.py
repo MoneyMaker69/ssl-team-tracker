@@ -103,10 +103,9 @@ def render_status(fetched_at: datetime, ok: bool) -> None:
         freshness = f"{age / 3600:.1f} h ago"
 
     state = "Live" if ok else "Stale"
-    st.markdown(
-        f'<div class="ssl-status"><strong>{state}</strong>'
-        f"Data as of {local:%H:%M UTC on %d %b %Y} · fetched {freshness}</div>",
-        unsafe_allow_html=True,
+    ui.status_bar(
+        state,
+        f"Data as of {local:%H:%M UTC on %d %b %Y} · fetched {freshness}",
     )
 
 
