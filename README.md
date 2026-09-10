@@ -7,7 +7,7 @@ depth, finances, availability and historical trends, built on the live SSL API.
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run team.py
 ```
 
 `python test_offline.py` runs the analytics checks. They need no network and no
@@ -15,15 +15,25 @@ Streamlit — just pandas — so they're safe to run in CI.
 
 ## Layout
 
+Every file sits at the repo root. There are no packages or subfolders, because
+Streamlit Community Cloud pins the main file path at deploy time and the flat
+layout is far easier to maintain through GitHub's web interface.
+
 | File | Responsibility |
 |---|---|
-| `app.py` | Entry point: caching, refresh, sidebar filters, page routing |
+| `team.py` | Entry point: caching, refresh, sidebar filters, page routing |
 | `config.py` | Every constant worth changing. Start here. |
 | `data.py` | API fetch, schema validation, normalisation, Sheet loading, endpoint probe |
 | `metrics.py` | Position taxonomy, Best XI solver, gap analysis, value metrics, insights |
 | `charts.py` | One Plotly template, deterministic team colours, chart builders |
 | `ui.py` | Theme CSS, notices, currency formatting, CSV export |
-| `views/` | One module per page |
+| `page_*.py` | One module per page: overview, team, compare, players, history, admin |
+| `.streamlit/config.toml` | Dark theme. Must live at this exact path or it's ignored. |
+
+`team.py` keeps its name from the original single-file version. The deployment is
+pinned to that path and Streamlit offers no way to change it after the fact, so
+renaming it would break the live app's URL. Nothing else survives from the old
+file.
 
 ## Things a maintainer should know
 
@@ -56,12 +66,12 @@ They're excluded from league analytics by default and there's a sidebar toggle.
 every figure in the app updates.
 
 **The Google Sheet is the only fragile input.** It's the sole source for
-historical data, and it's the only thing that can't be validated against a
-schema. The loader prefers a pinned layout (`SHEET_LAYOUT`); if you leave
-`header_row` as `None` it falls back to scanning and says so. Every failure mode
-produces a distinct message rather than an empty tab. Sheet-to-API name matching
-runs override → exact → close match, and anything that falls through is listed in
-Admin → Name matching instead of quietly failing the merge.
+historical data, and the only thing that can't be validated against a schema. The
+loader prefers a pinned layout (`SHEET_LAYOUT`); if you leave `header_row` as
+`None` it falls back to scanning and says so. Every failure mode produces a
+distinct message rather than an empty tab. Sheet-to-API name matching runs
+override, then exact, then close match, and anything that falls through is listed
+in Admin → Name matching instead of quietly failing the merge.
 
 **Endpoint discovery is built in.** The published docs at `/__docs__` currently
 return 404, so Admin → API endpoints probes a candidate list live from wherever
@@ -74,3 +84,9 @@ progression would slot in.
 Add an entry to `FORMATIONS` in `config.py` as a list of `(label, pos_column)`
 pairs, eleven long. Best XI and the gap analysis both pick it up with no other
 changes.
+
+## Adding a page
+
+Create `page_yourname.py` with a `render(ctx)` function, import it in `team.py`,
+and add one line to the `pages` dict. The `Context` dataclass at the top of
+`team.py` documents what `ctx` carries.

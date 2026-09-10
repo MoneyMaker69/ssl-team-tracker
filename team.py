@@ -1,276 +1,271 @@
-"""Single-club deep dive."""
+"""
+SSL Team Tracker & GM Dashboard — application entry point.
+
+Run with:  streamlit run team.py
+
+The filename is inherited from the original single-file version. Streamlit
+Community Cloud pins the main file path at deploy time and offers no way to
+change it afterwards, so keeping this name is what lets the existing
+deployment and its URL carry on working. Everything else was rewritten.
+Page modules live in page_*.py; shared logic in config/data/metrics/charts/ui.
+"""
 
 from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
 import charts
 import config
+import data
 import metrics
 import ui
+from data import LoadResult
+import page_admin
+import page_compare
+import page_history
+import page_overview
+import page_players
+import page_team
+
+st.set_page_config(
+    page_title="SSL Team Tracker",
+    page_icon="⚽",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+charts.install_template()
+ui.inject_css()
 
 
-def _roster_columns(df: pd.DataFrame) -> list[str]:
-    wanted = [
-        "name", "position", "primary_group", "class", "tpe", "timesregressed",
-        "bankBalance", "minimum salary", "userStatus", "playerStatus",
-        "nationality",
-    ]
-    return [c for c in wanted if c in df.columns]
+# ---------------------------------------------------------------------------
+# Cached loaders
+# ---------------------------------------------------------------------------
+# The cache key includes a nonce from session state. Bumping the nonce forces a
+# real fetch, which is what the Refresh button does — the TTL still applies on
+# its own for everyone who doesn't press it.
 
 
-_LABELS = {
-    "name": "Player", "position": "Pos", "primary_group": "Group",
-    "class": "Class", "tpe": "TPE", "timesregressed": "Regressions",
-    "bankBalance": "Bank", "minimum salary": "Min salary",
-    "userStatus": "User", "playerStatus": "Status", "nationality": "Nationality",
-}
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def load_players(nonce: int) -> LoadResult:
+    return data.fetch_players(nonce)
 
 
-def render(ctx) -> None:
-    df = ctx.frame
-    if df.empty:
-        ui.empty_state(
-            "No clubs match these filters",
-            "Relax the sidebar filters to bring squads back into view.",
-        )
-        return
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def load_history(nonce: int) -> tuple[LoadResult, str]:
+    return data.fetch_sheet_history(nonce)
 
-    entities = sorted(str(e) for e in df[ctx.group_col].dropna().unique())
-    if not entities:
-        ui.empty_state("Nothing to inspect", "No named entity survived the filters.")
-        return
 
-    st.header("Team deep dive")
-    selected = st.selectbox(f"Choose a {ctx.entity_noun}", entities)
-    squad = df[df[ctx.group_col].astype(str) == selected]
+# ---------------------------------------------------------------------------
+# View context
+# ---------------------------------------------------------------------------
 
-    if squad.empty:
-        ui.empty_state(
-            f"{selected} has no players in this selection",
-            "The club exists but every player was filtered out.",
-        )
-        return
 
-    header = st.columns(5)
-    header[0].metric("Players", len(squad))
-    header[1].metric("Mean TPE", f"{squad['tpe'].mean():,.0f}")
-    header[2].metric("Total TPE", f"{squad['tpe'].sum():,.0f}")
-    header[3].metric("Bank", ui.money_compact(squad["bankBalance"].sum()))
-    header[4].metric("At risk", int(squad["at_risk"].sum()))
+@dataclass
+class Context:
+    """Everything a view needs, assembled once per run."""
 
-    if ctx.group_col == "team":
-        org = squad["org"].iloc[0]
-        tier = squad["tier"].iloc[0]
-        siblings = sorted(
-            ctx.full_frame[
-                (ctx.full_frame["org"] == org)
-                & (ctx.full_frame["team"] != selected)
-            ]["team"].unique()
-        )
-        note = f"{tier} side of {org}"
-        if siblings:
-            note += " — affiliated with " + ", ".join(siblings)
-        st.caption(note)
+    full_frame: pd.DataFrame          # all players, unfiltered
+    frame: pd.DataFrame               # after sidebar filters
+    ranked_frame: pd.DataFrame        # after the roster-scope filter
+    players: LoadResult
+    history: LoadResult
+    history_label: str
+    history_matched: pd.DataFrame
+    history_fuzzy: list
+    history_unmatched: list
+    group_col: str
+    group_label: str
+    entity_noun: str
+    metric: str
+    formation: str
+    roster_label: str
+    color_map: dict = field(default_factory=dict)
 
-    st.divider()
 
-    tabs = st.tabs(
-        ["Best XI", "Squad", "Positions", "Gaps", "Attributes", "Availability"]
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
+
+def render_status(fetched_at: datetime, ok: bool) -> None:
+    local = fetched_at.astimezone(timezone.utc)
+    age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+    if age < 90:
+        freshness = "just now"
+    elif age < 3600:
+        freshness = f"{int(age // 60)} min ago"
+    else:
+        freshness = f"{age / 3600:.1f} h ago"
+
+    state = "Live" if ok else "Stale"
+    st.markdown(
+        f'<div class="ssl-status"><strong>{state}</strong>'
+        f"Data as of {local:%H:%M UTC on %d %b %Y} · fetched {freshness}</div>",
+        unsafe_allow_html=True,
     )
 
-    # ------------------------------------------------------------------ XI
-    with tabs[0]:
-        ui.section(
-            f"Best XI — {ctx.formation}",
-            "Each player is placed in a slot they're rated "
-            f"{config.FAMILIARITY_THRESHOLD}+ for, choosing the highest-TPE "
-            "eleven that still fills every position.",
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    st.session_state.setdefault("nonce", 0)
+
+    st.title("SSL Team Tracker")
+
+    with st.spinner("Loading player data…"):
+        players_result = load_players(st.session_state["nonce"])
+
+    # ---- Sidebar: refresh -------------------------------------------------
+    with st.sidebar:
+        st.markdown("### Data")
+        if st.button("Refresh now", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state["nonce"] += 1
+            st.session_state.pop("probe_results", None)
+            st.rerun()
+        st.caption(
+            f"Cached for {config.CACHE_TTL_SECONDS // 60} minutes. Refresh "
+            "before a draft or deadline to be sure."
         )
-        xi, warnings = metrics.best_xi(squad, ctx.formation)
-        if xi.empty:
-            ui.empty_state(
-                "Could not build an XI",
-                "This squad has too few players to fill the formation.",
-            )
-        else:
-            display = xi.copy()
-            display["In position"] = display["In position"].map(
-                {True: "Yes", False: "Out of position"}
-            )
-            display["At risk"] = display["At risk"].map({True: "Yes", False: ""})
-            st.dataframe(display, use_container_width=True, hide_index=True)
 
-            summary = st.columns(3)
-            summary[0].metric("XI total TPE", f"{xi['TPE'].sum():,.0f}")
-            summary[1].metric("XI mean TPE", f"{xi['TPE'].mean():,.0f}")
-            summary[2].metric(
-                "Natural fits",
-                f"{int((xi['Familiarity'] >= config.FAMILIARITY_NATURAL).sum())}/11",
-            )
+    render_status(players_result.fetched_at, players_result.ok)
 
-            for warning in warnings:
-                st.warning(warning, icon=":material/warning:")
+    if not players_result.ok or players_result.is_empty:
+        ui.render_notices(players_result.notices)
+        ui.empty_state(
+            "The dashboard has no data to work with",
+            "Every page depends on the player endpoint. The message above says "
+            "what went wrong. Press Refresh once the API is back.",
+        )
+        return
 
-            ui.download(xi, f"ssl_best_xi_{selected}.csv")
+    ui.render_notices(players_result.notices, only={"error"})
 
+    full = players_result.frame
+
+    # ---- History (optional; failure must not block the app) ---------------
+    history_result, history_label = load_history(st.session_state["nonce"])
+    api_teams = sorted(full["team"].dropna().astype(str).unique())
+    matched, fuzzy, unmatched = data.match_sheet_teams(
+        history_result.frame, api_teams
+    )
+
+    # ---- Sidebar: filters -------------------------------------------------
+    with st.sidebar:
+        st.markdown("### View")
+        page = st.radio(
+            "Page",
+            ["Overview", "Team", "Head to head", "Players", "History", "Admin"],
+            label_visibility="collapsed",
+        )
+
+        st.markdown("### Filters")
+
+        grouping = st.radio(
+            "Group by", ["Club", "Organisation"], horizontal=True,
+        )
+        group_col = "team" if grouping == "Club" else "org"
+        entity_noun = "club" if grouping == "Club" else "organisation"
+
+        tier = st.radio(
+            "Tier", ["Both", "Majors only", "Minors only"], horizontal=True,
+        )
+
+        roster_scope = st.radio(
+            "Roster scope",
+            ["Whole squad", "Top 11 by TPE"],
+        )
+        if roster_scope == "Top 11 by TPE":
             st.caption(
-                "For raw quality regardless of shape, switch the sidebar roster "
-                "filter to 'Top 11 by TPE' — that one ignores position entirely."
+                "Position is ignored here — this can be eleven strikers. For a "
+                "shape-aware eleven, use Best XI on the Team page."
             )
 
-    # --------------------------------------------------------------- Squad
-    with tabs[1]:
-        ui.section("Full squad", "Sortable. Regressions double as an age counter.")
-        table = squad[_roster_columns(squad)].rename(columns=_LABELS)
-        table = table.sort_values("TPE", ascending=False)
-        st.dataframe(table, use_container_width=True, hide_index=True)
-        ui.download(table, f"ssl_squad_{selected}.csv")
+        metric = st.radio("Metric", ["Average", "Total"], horizontal=True)
 
-    # ----------------------------------------------------------- Positions
-    with tabs[2]:
-        ui.section(
-            "Squad by position group",
-            "Grouped on each player's declared primary position, so the counts "
-            "add up to the squad exactly once.",
+        formation = st.selectbox(
+            "Formation", list(config.FORMATIONS), index=list(
+                config.FORMATIONS
+            ).index(config.DEFAULT_FORMATION),
         )
-        st.dataframe(
-            metrics.group_summary(squad, ctx.metric),
-            use_container_width=True, hide_index=True,
+        st.caption("Drives Best XI and the gap analysis.")
+
+        include_free_agents = st.checkbox(
+            "Include free agents", value=False,
+            help=(
+                "Free agents are returned by the API as a team but aren't a "
+                "club. Including them will distort league averages."
+            ),
         )
 
-        ui.section(
-            "Positional coverage",
-            "How many players could line up at each position. These overlap on "
-            "purpose — one player rated at three positions counts three times — "
-            "so read it as versatility, not squad size.",
+    # ---- Apply filters ----------------------------------------------------
+    frame = full if include_free_agents else full[full["is_club"]]
+
+    if tier == "Majors only":
+        frame = frame[frame["tier"] == "Major"]
+    elif tier == "Minors only":
+        frame = frame[frame["tier"] == "Minor"]
+
+    ranked = frame
+    if roster_scope == "Top 11 by TPE" and not frame.empty:
+        ranked = metrics.top_n_by_tpe(frame, group_col, 11)
+        frame = ranked
+
+    color_map = charts.assign_team_colors(
+        list(full["team"].dropna().astype(str).unique())
+        + list(full["org"].dropna().astype(str).unique())
+        + list(matched["team"].astype(str).unique() if not matched.empty else [])
+    )
+
+    ctx = Context(
+        full_frame=full,
+        frame=frame,
+        ranked_frame=ranked,
+        players=players_result,
+        history=history_result,
+        history_label=history_label,
+        history_matched=matched,
+        history_fuzzy=fuzzy,
+        history_unmatched=unmatched,
+        group_col=group_col,
+        group_label=f"{entity_noun}s",
+        entity_noun=entity_noun,
+        metric=metric,
+        formation=formation,
+        roster_label=roster_scope,
+        color_map=color_map,
+    )
+
+    # ---- Route ------------------------------------------------------------
+    pages = {
+        "Overview": page_overview.render,
+        "Team": page_team.render,
+        "Head to head": page_compare.render,
+        "Players": page_players.render,
+        "History": page_history.render,
+        "Admin": page_admin.render,
+    }
+    pages[page](ctx)
+
+    # A quiet standing pointer to the reconciliation view, so a new club is
+    # never something you have to already know to look for.
+    with st.sidebar:
+        st.divider()
+        clubs = full[full["is_club"]]["team"].nunique()
+        orgs = full[full["is_club"]]["org"].nunique()
+        st.caption(
+            f"{clubs} clubs across {orgs} organisations, read from the API at "
+            "run time. Admin lists them all."
         )
-        coverage = metrics.coverage_matrix(squad, ctx.group_col)
-        if not coverage.empty:
-            st.plotly_chart(
-                charts.coverage_heatmap(
-                    coverage, f"Players able to fill each position — {selected}"
-                ),
-                use_container_width=True,
-            )
-            ui.download(coverage, f"ssl_coverage_{selected}.csv")
 
-    # -------------------------------------------------------------- Gaps
-    with tabs[3]:
-        ui.section(
-            "Where this squad is thin",
-            f"Measured against {ctx.formation}. Ordered worst first.",
-        )
-        gaps = metrics.positional_gaps(squad, ctx.formation)
-        problems = gaps[gaps["Verdict"].str.startswith(("Short", "No cover"))]
-        if problems.empty:
-            st.success(
-                f"Every position in {ctx.formation} has cover to spare.",
-                icon=":material/check_circle:",
-            )
-        else:
-            for _, row in problems.iterrows():
-                st.warning(
-                    f"**{row['Position']}** — {row['Verdict'].lower()}",
-                    icon=":material/warning:",
-                )
-        st.dataframe(gaps, use_container_width=True, hide_index=True)
-        ui.download(gaps, f"ssl_gaps_{selected}.csv")
 
-    # -------------------------------------------------------- Attributes
-    with tabs[4]:
-        outfield = squad[~squad["is_keeper"]]
-        keepers = squad[squad["is_keeper"]]
-
-        ui.section(
-            "Outfield attribute profile",
-            "Keepers are excluded — their 5s across finishing and crossing drag "
-            "a squad average down without saying anything about the outfield.",
-        )
-        if outfield.empty:
-            ui.empty_state(
-                "No outfield players in this squad",
-                "Everyone here is a goalkeeper.",
-            )
-        else:
-            available = [a for a in config.RADAR_OUTFIELD if a in outfield.columns]
-            group_filter = st.selectbox(
-                "Limit to a position group",
-                ["All outfield"] + [g for g in config.GROUP_ORDER if g != "Goalkeeper"],
-                key="team_radar_group",
-            )
-            scope = outfield if group_filter == "All outfield" else outfield[
-                outfield["primary_group"] == group_filter
-            ]
-            if scope.empty:
-                ui.empty_state(
-                    f"No {group_filter.lower()} players here",
-                    "Pick a different group.",
-                )
-            else:
-                means = scope[available].mean().round(2)
-                st.plotly_chart(
-                    charts.radar(
-                        [(f"{selected} — {group_filter}", means,
-                          ctx.color_map.get(selected, config.COLORS["primary"]))],
-                        f"{group_filter}, mean of {len(scope)} players",
-                    ),
-                    use_container_width=True,
-                )
-                st.caption(
-                    "Stamina and natural fitness sit at 20 for nearly every "
-                    "player, so they're left off the radar."
-                )
-
-        ui.section("Goalkeeping", "")
-        gk_available = [a for a in config.GK_ATTRIBUTES if a in squad.columns]
-        if keepers.empty:
-            st.warning(
-                "No goalkeeper on this roster.", icon=":material/warning:"
-            )
-        elif gk_available:
-            gk_means = keepers[gk_available].mean().round(2)
-            st.plotly_chart(
-                charts.radar(
-                    [(f"{selected} keepers", gk_means, config.COLORS["amber"])],
-                    f"Keeper attributes, mean of {len(keepers)}",
-                ),
-                use_container_width=True,
-            )
-            st.dataframe(
-                keepers[["name", "tpe", "class"] + gk_available]
-                .rename(columns={"name": "Player", "tpe": "TPE", "class": "Class"})
-                .sort_values("TPE", ascending=False),
-                use_container_width=True, hide_index=True,
-            )
-
-    # ------------------------------------------------------- Availability
-    with tabs[5]:
-        ui.section(
-            "Roster availability",
-            "A high-TPE player behind an inactive account is a roster spot that "
-            "isn't doing anything. This is the fastest read on that.",
-        )
-        risk = squad[squad["at_risk"]]
-        cols = st.columns(3)
-        cols[0].metric("Inactive users", int(squad["user_inactive"].sum()))
-        cols[1].metric("Retiring", int(squad["retiring"].sum()))
-        cols[2].metric("TPE affected", f"{risk['tpe'].sum():,.0f}")
-
-        if risk.empty:
-            st.success(
-                "Every player here has an active user and no retirement flag.",
-                icon=":material/check_circle:",
-            )
-        else:
-            columns = [c for c in ("name", "position", "tpe", "class",
-                                   "userStatus", "playerStatus", "username")
-                       if c in risk.columns]
-            st.dataframe(
-                risk[columns]
-                .rename(columns={**_LABELS, "username": "Account"})
-                .sort_values("TPE", ascending=False),
-                use_container_width=True, hide_index=True,
-            )
-            ui.download(risk[columns], f"ssl_at_risk_{selected}.csv")
+if __name__ == "__main__":
+    main()
