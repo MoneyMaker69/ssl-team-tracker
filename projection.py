@@ -207,33 +207,37 @@ def project_player(
     projecting at the rate actually measured.
     """
     rows = []
-    value = float(tpe)
+    start = float(tpe)
     for step in range(horizon + 1):
         season = current_season + step
         number = career_season(season, draft_class)
-        if step:
-            # Earnings for the season just finished, scaled on the first step
-            # because we are already partway through the current season and the
-            # TPE we started from includes what has been banked so far.
-            value += rate * (first_step_fraction if step == 1 else 1.0)
-            # The regression charged on entering `season` is the one for the
-            # season that just ENDED. A player in career season 8 during S27
-            # takes the season-8 rate at the end of S27, not season 9's.
-            finished = career_season(season - 1, draft_class)
-            loss = value * regression_rate(finished)
-            value -= loss
-        else:
-            loss = 0.0
+
+        # How much of this season's earning is still ahead. On the first step
+        # only the remainder counts, because the TPE we started from already
+        # contains what has been banked so far this season.
+        earned = rate * (first_step_fraction if step == 0 else 1.0)
+
+        # A player's high point is the moment before regression: they earn all
+        # season, then the rate for THAT career season is applied at the turn.
+        # Reporting only start-of-season TPE hides this and makes anyone whose
+        # regression outruns their earnings look like they already peaked.
+        before = start + earned
+        rate_pct = regression_rate(number)
+        loss = before * rate_pct
+        after = before - loss
+
         rows.append({
             "Season": f"S{season}",
             "season_num": season,
             "Career season": number,
-            "TPE": round(value, 1),
-            "Regression at end": (f"{regression_rate(number):.0%}"
-                                  if number >= config.REGRESSION_FIRST_SEASON
-                                  else "—"),
-            "Lost entering": round(loss, 1),
+            "Start": round(start, 1),
+            "Earns": round(earned, 1),
+            "End of season": round(before, 1),
+            "Regression": f"{rate_pct:.0%}" if rate_pct else "—",
+            "Lost": round(loss, 1),
+            "Next season": round(after, 1),
         })
+        start = after
     return pd.DataFrame(rows)
 
 
@@ -251,18 +255,24 @@ def peak_summary(
     path = project_player(tpe, draft_class, rate, current_season, horizon=18,
                           first_step_fraction=first_step_fraction)
 
-    best = path.loc[path["TPE"].idxmax()]
+    # The peak is the largest END-OF-SEASON value, i.e. the instant before a
+    # regression lands — not the largest start-of-season value.
+    best = path.loc[path["End of season"].idxmax()]
     peak_season = int(best["season_num"])
-    peak_value = float(best["TPE"])
+    peak_value = float(best["End of season"])
 
-    # "Useful life" = seasons until they fall below the current league median,
-    # which is a more honest retirement signal than an arbitrary TPE floor.
+    # Whether they will net-lose from next season onward: true once the coming
+    # regression takes more than a season's earnings, and permanent after that
+    # because the rate only ever climbs.
+    declining = peak_season <= current_season
+
     return {
         "career_season": number_now,
         "peak_season": peak_season,
         "peak_tpe": peak_value,
         "peak_career_season": career_season(peak_season, draft_class),
-        "at_peak": peak_season <= current_season,
+        "peaks_this_season": peak_season == current_season,
+        "declining": declining,
         "seasons_to_peak": max(0, peak_season - current_season),
         "current_regression": regression_rate(number_now),
         "next_regression": regression_rate(number_now + 1),
@@ -272,7 +282,7 @@ def peak_summary(
 
 def seasons_until_below(path: pd.DataFrame, threshold: float) -> int | None:
     """First projected season where TPE drops under `threshold`."""
-    below = path[path["TPE"] < threshold]
+    below = path[path["End of season"] < threshold]
     if below.empty:
         return None
     return int(below.iloc[0]["season_num"])

@@ -219,8 +219,7 @@ def _org(ctx, rates) -> None:
             "TPE": int(player["tpe"]),
             "Rate": round(rate),
             "Peak TPE": round(summary["peak_tpe"]),
-            "Peak in": ("past peak" if summary["at_peak"]
-                        else f"S{summary['peak_season']}"),
+            "Peak at": f"end of S{summary['peak_season']}",
             "Regression now": f"{summary['current_regression']:.0%}",
             "Measured": "yes" if rates.is_measured(name) else "assumed",
         })
@@ -230,11 +229,12 @@ def _org(ctx, rates) -> None:
         st.dataframe(frame, use_container_width=True, hide_index=True)
         ui.download(frame, f"ssl_player_peaks_{org}.csv")
 
-        past = frame[frame["Peak in"] == "past peak"]
-        if not past.empty:
+        peaking_now = frame[frame["Peak at"] == f"end of S{ctx.current_season}"]
+        if not peaking_now.empty:
             st.caption(
-                f"{len(past)} of {len(frame)} players are past their peak, "
-                f"holding {past['TPE'].sum():,} TPE between them."
+                f"{len(peaking_now)} of {len(frame)} players top out at the end "
+                f"of this season and decline from S{ctx.current_season + 1} on, "
+                f"holding {peaking_now['TPE'].sum():,} TPE between them."
             )
 
 
@@ -273,9 +273,19 @@ def _player(ctx, rates) -> None:
     cols[1].metric("Career season", summary["career_season"])
     cols[2].metric("Earning rate", f"{rate:,.0f}/szn")
     cols[3].metric("Peak TPE", f"{summary['peak_tpe']:,.0f}")
-    cols[4].metric(
-        "Peak", "passed" if summary["at_peak"] else f"S{summary['peak_season']}"
-    )
+    cols[4].metric("Peaks at", f"end of S{summary['peak_season']}")
+
+    if summary["peaks_this_season"]:
+        st.caption(
+            f"Still climbing for the rest of S{ctx.current_season} — the high "
+            f"point is {summary['peak_tpe']:,.0f} at season's end, before the "
+            f"{summary['current_regression']:.0%} hit. Downhill from there."
+        )
+    else:
+        st.caption(
+            f"{summary['seasons_to_peak']} more season(s) of growth, topping "
+            f"out at {summary['peak_tpe']:,.0f}."
+        )
 
     if not live:
         st.warning(
@@ -307,8 +317,14 @@ def _player(ctx, rates) -> None:
     path = summary["path"].head(ctx.horizon + 1)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=path["Season"], y=path["TPE"], mode="lines+markers",
-        line=dict(color=config.COLORS["primary"], width=3), name="Projected TPE",
+        x=path["Season"], y=path["End of season"], mode="lines+markers",
+        line=dict(color=config.COLORS["primary"], width=3),
+        name="End of season (pre-regression)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=path["Season"], y=path["Next season"], mode="lines+markers",
+        line=dict(color=config.COLORS["blue"], width=2, dash="dot"),
+        name="After regression",
     ))
     fig.add_hline(
         y=summary["peak_tpe"], line_dash="dot",
