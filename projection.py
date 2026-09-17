@@ -62,6 +62,21 @@ def training_camp(season_number: int) -> int:
     return config.TRAINING_CAMP_DEFAULT
 
 
+def rookie_start_tpe(draft_class: int) -> int:
+    """
+    TPE a player was created with.
+
+    S23 was the last class to start at 350; from S24 it is 250.
+    """
+    try:
+        cls = int(draft_class)
+    except (TypeError, ValueError):
+        return config.ROOKIE_START_TPE
+    return (config.LEGACY_ROOKIE_START_TPE
+            if cls <= config.LEGACY_ROOKIE_LAST_CLASS
+            else config.ROOKIE_START_TPE)
+
+
 def theoretical_max_season() -> int:
     """
     Ceiling on weekly earnings alone: one Activity Check and one PT per week.
@@ -141,19 +156,33 @@ def measure_rates(
     current_season: int,
     window: int = 2,
     generated_at: str | None = None,
+    first_seasons: dict[str, int] | None = None,
 ) -> RateTable:
     """
     Average TPE earned per complete season, per player.
 
-    The current season is excluded because it is partial — including it would
-    make every player look like they had collapsed. `window` is how many
-    complete seasons back to average over: short reacts quickly to someone
-    changing their habits, long is steadier.
+    Two seasons are deliberately left out.
+
+    The current one, because it is partial — counting it would make everyone
+    look like they had just collapsed.
+
+    And each player's first career season, because it holds their creation
+    grant (350 for classes up to S23, 250 from S24) plus however much of that
+    season they actually played. Both distort the figure, and the grant is TPE
+    received rather than earned. Pass `first_seasons` as {name: draft class} to
+    enable this; without it the filter is skipped.
+
+    `window` is how many complete seasons back to average over: short reacts
+    quickly to someone changing their habits, long is steadier.
     """
     if history.empty:
         return RateTable({}, window, 0.0, current_season, generated_at, {})
 
     complete = history[history["season"] < current_season].copy()
+
+    if first_seasons:
+        creation = complete["name"].astype(str).map(first_seasons)
+        complete = complete[creation.isna() | (complete["season"] != creation)]
     if complete.empty:
         return RateTable({}, window, 0.0, current_season, generated_at, {})
 

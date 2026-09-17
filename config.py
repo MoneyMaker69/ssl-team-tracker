@@ -314,7 +314,14 @@ PT_PER_WEEK = 6
 
 # Rookies start at 250 and can do all the normal tasks during their one academy
 # season, so they enter the draft meaningfully above 250.
+#
+# S23 was the last class to start at 350; S24 onward start at 250. That grant
+# is TPE received, not earned, so it must be kept out of measured earning rates
+# or anyone whose creation season falls inside the rate window looks far more
+# productive than they are.
 ROOKIE_START_TPE = 250
+LEGACY_ROOKIE_START_TPE = 350
+LEGACY_ROOKIE_LAST_CLASS = 23
 DEFAULT_DRAFTEE_ENTRY_TPE = 420
 
 # History cache, written by scripts/fetch_history.py via the weekly Action.

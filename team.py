@@ -290,9 +290,19 @@ def main() -> None:
     season_left = projection.season_remaining(
         history_meta.get("season_starts"), current_season
     )
+    # Each player's first career season equals their draft class, which lets
+    # measure_rates drop the season containing their creation grant.
+    first_seasons = {
+        str(row.name_): int(row.season_num)
+        for row in full[["name", "season_num"]]
+        .dropna()
+        .rename(columns={"name": "name_"})
+        .itertuples()
+    }
     rates = projection.measure_rates(
         tpe_history, current_season, window=rate_window,
         generated_at=history_meta.get("generated_at"),
+        first_seasons=first_seasons,
     )
 
     ctx = Context(
