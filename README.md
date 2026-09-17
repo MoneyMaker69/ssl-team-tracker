@@ -27,7 +27,11 @@ layout is far easier to maintain through GitHub's web interface.
 | `metrics.py` | Position taxonomy, Best XI solver, gap analysis, value metrics, insights |
 | `charts.py` | One Plotly template, deterministic team colours, chart builders |
 | `ui.py` | Theme CSS, notices, currency formatting, CSV export |
-| `page_*.py` | One module per page: overview, team, compare, players, history, admin |
+| `page_*.py` | One module per page: overview, team, compare, players, projection, history, admin |
+| `projection.py` | Regression rules, measured earning rates, peaks, org simulation |
+| `scripts/fetch_history.py` | Builds the TPE history cache (run by the Action) |
+| `.github/workflows/` | Weekly job that refreshes `cache/` and commits it |
+| `cache/` | Generated. Committed on purpose — do not gitignore it. |
 | `.streamlit/config.toml` | Dark theme. Must live at this exact path or it's ignored. |
 
 `team.py` keeps its name from the original single-file version. The deployment is
@@ -90,3 +94,59 @@ changes.
 Create `page_yourname.py` with a `render(ctx)` function, import it in `team.py`,
 and add one line to the `pages` dict. The `Context` dataclass at the top of
 `team.py` documents what `ctx` carries.
+
+
+## Projections
+
+### How the cache works
+
+`getTPEhistory` is one API call per player, so a full refresh is 300+ requests
+and can't run on a page load. Streamlit Cloud also wipes its filesystem on every
+reboot, so a runtime cache would be rebuilt constantly.
+
+Instead, `.github/workflows/update-tpe-history.yml` runs every Monday, calls
+`scripts/fetch_history.py`, and commits two small files to `cache/`. The
+dashboard only ever reads those files. You get instant loads and a versioned
+archive of league history as a side effect.
+
+Run it by hand any time from the repo's **Actions** tab (Update TPE history →
+Run workflow) — worth doing right after a regression post lands. Locally:
+
+```bash
+python scripts/fetch_history.py
+```
+
+The Projection page degrades gracefully: if `cache/tpe_by_season.csv` is
+missing, it says so and points at the Action. Nothing else in the dashboard
+depends on it.
+
+### What the model does and doesn't assume
+
+**Regression is exact.** The rulebook fixes it: career season 8 costs 10%,
+rising 5 points a season to a 40% cap at season 14+. Career season is
+`current_season - class + 1`, so a S13 draftee is in season 8 during S20.
+
+**Earning is measured, never assumed.** Each player's rate is the mean TPE they
+actually logged per complete season, over a configurable window. Rates are held
+fixed across the horizon by choice — no decay toward the mean.
+
+Two things that will look like bugs and aren't:
+
+- **Historical TPE logs won't reconcile against the current rules.** Both the
+  regression table and training camp were changed around S22 (regression used to
+  start a season earlier; camp paid 30/20/6 rather than 24/18/12/6). The model
+  projects forward under current rules and makes no attempt to replay history.
+- **Peak is a plateau at career season 8, not a spike**, and it sits there at
+  every effort level. TPE scales with earnings, so the ratio between them doesn't
+  move — effort sets how high you peak, never when. The real cliff is season 9,
+  where 15% starts outrunning anything a player can earn back.
+
+### Known limits
+
+- A measured rate includes training camp, which steps down from 24 to 6 TPE over
+  a career, so young players carry up to ~18 TPE/season of optimism.
+- Draftees enter around 420 TPE (250 at creation plus one academy season) and
+  need roughly six seasons to reach a strong org's Major XI. Inside a five-season
+  horizon the draft only moves the needle for the weakest orgs.
+- Attrition is a hazard rate, not a prediction. The 10th-90th percentile band on
+  the org projection is as important as the median line.

@@ -285,3 +285,50 @@ TEAM_PALETTE = [
 ]
 
 PLOTLY_TEMPLATE = "ssl_dark"
+
+
+# ---------------------------------------------------------------------------
+# Projection rules (SSL Rulebook)
+# ---------------------------------------------------------------------------
+
+# Keyed on CAREER SEASON NUMBER (1-indexed), not on seasons elapsed: a player
+# drafted in S13 is in career season 8 during S20. Season 8 is the first that
+# regresses. Verified against the S26 regression post to the TPE.
+#
+# Note the schedule was harsher before ~S22 (10% started a season earlier), so
+# historical TPE logs will NOT reconcile against this table. That is expected.
+REGRESSION_FIRST_SEASON = 8
+REGRESSION_SCHEDULE = {8: 0.10, 9: 0.15, 10: 0.20, 11: 0.25, 12: 0.30, 13: 0.35}
+REGRESSION_MAX = 0.40            # career season 14 and beyond
+MAX_CAREER_SEASON = 20           # past this a player is assumed gone
+
+# Training camp steps down with career season. Also changed historically
+# (was 30 / 20 / 6), so old logs won't match this either.
+TRAINING_CAMP_BANDS = [(3, 24), (6, 18), (9, 12)]
+TRAINING_CAMP_DEFAULT = 6
+
+# One Activity Check and one Weekly PT per week, 6 TPE each.
+WEEKS_PER_SEASON = 10
+AC_PER_WEEK = 6
+PT_PER_WEEK = 6
+
+# Rookies start at 250 and can do all the normal tasks during their one academy
+# season, so they enter the draft meaningfully above 250.
+ROOKIE_START_TPE = 250
+DEFAULT_DRAFTEE_ENTRY_TPE = 420
+
+# History cache, written by scripts/fetch_history.py via the weekly Action.
+CACHE_DIR = "cache"
+TPE_HISTORY_CSV = "cache/tpe_by_season.csv"
+HISTORY_META_JSON = "cache/history_meta.json"
+
+CURRENT_SEASON_ENDPOINT = f"{API_BASE}/admin/getCurrentSeason"
+TPE_HISTORY_ENDPOINT = f"{API_BASE}/player/getTPEhistory"
+SCHEDULE_ENDPOINT = f"{API_BASE}/index/schedule"
+
+# Projection defaults, all overridable from the sidebar.
+DEFAULT_HORIZON = 5
+DEFAULT_RATE_WINDOW = 2          # complete seasons used to measure earning rate
+DEFAULT_ATTRITION = 0.12
+DEFAULT_DRAFTEES_PER_SEASON = 2
+MONTE_CARLO_TRIALS = 300

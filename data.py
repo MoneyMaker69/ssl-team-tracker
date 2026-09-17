@@ -640,3 +640,109 @@ def probe_endpoints(paths: list[str] | None = None) -> pd.DataFrame:
                 "Shape": type(exc).__name__,
             })
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# TPE history cache
+# ---------------------------------------------------------------------------
+
+
+def load_history_cache() -> tuple[pd.DataFrame, dict, list[Notice]]:
+    """
+    Read the per-season TPE history written by scripts/fetch_history.py.
+
+    This is a local file, not an API call: getTPEhistory is one request per
+    player, so a live refresh would be 300+ calls per page load. The weekly
+    GitHub Action keeps the file current and commits it to the repo.
+    """
+    import json
+    from pathlib import Path
+
+    notices: list[Notice] = []
+    empty = pd.DataFrame(columns=["name", "username", "season", "earned",
+                                  "regression", "events"])
+
+    csv_path = Path(config.TPE_HISTORY_CSV)
+    meta_path = Path(config.HISTORY_META_JSON)
+
+    if not csv_path.exists():
+        notices.append(Notice(
+            "warning",
+            "No TPE history cache yet",
+            "Projections need cache/tpe_by_season.csv. Run the 'Update TPE "
+            "history' workflow from the Actions tab in GitHub, or run "
+            "`python scripts/fetch_history.py` locally and commit the result. "
+            "Everything else in the dashboard works without it.",
+        ))
+        return empty, {}, notices
+
+    try:
+        frame = pd.read_csv(csv_path)
+    except Exception as exc:  # noqa: BLE001 - surfaced below
+        notices.append(Notice(
+            "error", "Could not read the TPE history cache",
+            f"{type(exc).__name__}: {exc}. The file may be corrupt — re-run the "
+            "Update TPE history workflow to rebuild it.",
+        ))
+        return empty, {}, notices
+
+    missing = [c for c in ("name", "season", "earned") if c not in frame.columns]
+    if missing:
+        notices.append(Notice(
+            "error", "The TPE history cache has unexpected columns",
+            "Missing: " + ", ".join(missing) + ". Rebuild it with the workflow.",
+        ))
+        return empty, {}, notices
+
+    frame["season"] = pd.to_numeric(frame["season"], errors="coerce")
+    frame["earned"] = pd.to_numeric(frame["earned"], errors="coerce").fillna(0)
+    frame = frame.dropna(subset=["season"])
+    frame["season"] = frame["season"].astype(int)
+
+    meta: dict = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            notices.append(Notice(
+                "warning", "Could not read the history cache metadata",
+                f"{type(exc).__name__}: {exc}. Rates still work; the 'as of' "
+                "date will be missing.",
+            ))
+
+    return frame, meta, notices
+
+
+def fetch_current_season() -> tuple[int | None, Notice | None]:
+    """Ask the API which season it is. Falls back to max(class) if unavailable."""
+    try:
+        response = requests.get(config.CURRENT_SEASON_ENDPOINT,
+                                timeout=config.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return None, Notice(
+            "info", "Could not read the current season from the API",
+            f"{type(exc).__name__}. Falling back to the highest draft class "
+            "seen in the player data, which is the same number in practice.",
+        )
+
+    if isinstance(payload, dict):
+        for key in ("season", "Season", "currentSeason", "current_season"):
+            if key in payload:
+                try:
+                    return int(payload[key]), None
+                except (TypeError, ValueError):
+                    pass
+        if len(payload) == 1:
+            try:
+                return int(next(iter(payload.values()))), None
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(payload), None
+    except (TypeError, ValueError):
+        return None, Notice(
+            "info", "The current-season endpoint returned an unexpected shape",
+            "Falling back to the highest draft class in the player data.",
+        )

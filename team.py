@@ -22,6 +22,7 @@ import charts
 import config
 import data
 import metrics
+import projection
 import ui
 from data import LoadResult
 import page_admin
@@ -29,6 +30,7 @@ import page_compare
 import page_history
 import page_overview
 import page_players
+import page_projection
 import page_team
 
 st.set_page_config(
@@ -60,6 +62,19 @@ def load_history(nonce: int) -> tuple[LoadResult, str]:
     return data.fetch_sheet_history(nonce)
 
 
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def load_tpe_history(nonce: int):
+    """Local cache file written by the weekly GitHub Action — no API calls."""
+    del nonce
+    return data.load_history_cache()
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def load_current_season(nonce: int):
+    del nonce
+    return data.fetch_current_season()
+
+
 # ---------------------------------------------------------------------------
 # View context
 # ---------------------------------------------------------------------------
@@ -84,6 +99,13 @@ class Context:
     metric: str
     formation: str
     roster_label: str
+    current_season: int
+    rates: object = None              # projection.RateTable
+    history_notices: list = field(default_factory=list)
+    horizon: int = config.DEFAULT_HORIZON
+    attrition: float = config.DEFAULT_ATTRITION
+    draftees: int = config.DEFAULT_DRAFTEES_PER_SEASON
+    draftee_tpe: int = config.DEFAULT_DRAFTEE_ENTRY_TPE
     color_map: dict = field(default_factory=dict)
 
 
@@ -162,7 +184,8 @@ def main() -> None:
         st.markdown("### View")
         page = st.radio(
             "Page",
-            ["Overview", "Team", "Head to head", "Players", "History", "Admin"],
+            ["Overview", "Team", "Head to head", "Players", "Projection",
+             "History", "Admin"],
             label_visibility="collapsed",
         )
 
@@ -197,6 +220,31 @@ def main() -> None:
         )
         st.caption("Drives Best XI and the gap analysis.")
 
+        with st.expander("Projection assumptions"):
+            horizon = st.slider(
+                "Seasons ahead", 2, 8, config.DEFAULT_HORIZON,
+                help="Beyond ~5 the uncertainty band is wider than the signal.",
+            )
+            rate_window = st.slider(
+                "Seasons used to measure earning rate", 1, 6,
+                config.DEFAULT_RATE_WINDOW,
+                help="Short reacts fast to a change in habits; long is steadier.",
+            )
+            attrition = st.slider(
+                "Chance a user quits per season", 0.0, 0.40,
+                config.DEFAULT_ATTRITION, 0.01,
+                help="Rises with career age. Retiring players leave regardless.",
+            )
+            draftees = st.slider(
+                "Draftees per season", 0, 4,
+                config.DEFAULT_DRAFTEES_PER_SEASON,
+            )
+            draftee_tpe = st.slider(
+                "Draftee entry TPE", 250, 700,
+                config.DEFAULT_DRAFTEE_ENTRY_TPE, 10,
+                help="250 at creation plus one academy season of tasks.",
+            )
+
         include_free_agents = st.checkbox(
             "Include free agents", value=False,
             help=(
@@ -224,6 +272,22 @@ def main() -> None:
         + list(matched["team"].astype(str).unique() if not matched.empty else [])
     )
 
+    # Current season: ask the API, else fall back to the highest draft class,
+    # which is the same number in practice and never goes stale.
+    api_season, season_notice = load_current_season(st.session_state["nonce"])
+    fallback_season = int(full["season_num"].max()) if full["season_num"].notna().any() else 0
+    current_season = api_season or fallback_season
+
+    tpe_history, history_meta, history_notices = load_tpe_history(
+        st.session_state["nonce"]
+    )
+    if season_notice:
+        history_notices = list(history_notices) + [season_notice]
+    rates = projection.measure_rates(
+        tpe_history, current_season, window=rate_window,
+        generated_at=history_meta.get("generated_at"),
+    )
+
     ctx = Context(
         full_frame=full,
         frame=frame,
@@ -240,6 +304,13 @@ def main() -> None:
         metric=metric,
         formation=formation,
         roster_label=roster_scope,
+        current_season=current_season,
+        rates=rates,
+        history_notices=history_notices,
+        horizon=horizon,
+        attrition=attrition,
+        draftees=draftees,
+        draftee_tpe=draftee_tpe,
         color_map=color_map,
     )
 
@@ -249,6 +320,7 @@ def main() -> None:
         "Team": page_team.render,
         "Head to head": page_compare.render,
         "Players": page_players.render,
+        "Projection": page_projection.render,
         "History": page_history.render,
         "Admin": page_admin.render,
     }
@@ -261,8 +333,8 @@ def main() -> None:
         clubs = full[full["is_club"]]["team"].nunique()
         orgs = full[full["is_club"]]["org"].nunique()
         st.caption(
-            f"{clubs} clubs across {orgs} organisations, read from the API at "
-            "run time. Admin lists them all."
+            f"Season S{current_season} · {clubs} clubs across {orgs} "
+            "organisations, read from the API at run time."
         )
 
 
