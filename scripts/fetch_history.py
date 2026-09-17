@@ -75,27 +75,67 @@ def get(url: str, params: dict | None = None):
     return None
 
 
-def current_season() -> int | None:
-    payload = get(CURRENT_SEASON_URL)
-    if payload is None:
+def coerce_season(payload, depth: int = 0) -> int | None:
+    """
+    Pull a season number out of whatever shape the endpoint returns.
+
+    Handles a bare number, a quoted number, "S27", a dict under any of the usual
+    key names, a single-key dict, and a list wrapping any of those.
+    """
+    if depth > 3 or payload is None or isinstance(payload, bool):
+        return None
+    if isinstance(payload, (int, float)):
+        value = int(payload)
+        return value if 0 < value < 1000 else None
+    if isinstance(payload, str):
+        match = re.search(r"\d+", payload)
+        if not match:
+            return None
+        value = int(match.group())
+        return value if 0 < value < 1000 else None
+    if isinstance(payload, list):
+        for item in payload[:3]:
+            found = coerce_season(item, depth + 1)
+            if found is not None:
+                return found
         return None
     if isinstance(payload, dict):
-        for key in ("season", "Season", "currentSeason", "current_season"):
+        for key in ("season", "Season", "currentSeason", "current_season",
+                    "SeasonNumber", "seasonNumber", "value", "data", "result"):
             if key in payload:
-                try:
-                    return int(payload[key])
-                except (TypeError, ValueError):
-                    pass
-        # Single-key object of unknown name
-        if len(payload) == 1:
-            try:
-                return int(next(iter(payload.values())))
-            except (TypeError, ValueError):
-                return None
-    try:
-        return int(payload)
-    except (TypeError, ValueError):
-        return None
+                found = coerce_season(payload[key], depth + 1)
+                if found is not None:
+                    return found
+        for value in list(payload.values())[:5]:
+            found = coerce_season(value, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def season_from_players(players: list) -> int | None:
+    """
+    Highest draft class on the active roster.
+
+    In practice this equals the current season — the newest class is always
+    playing — so it is a reliable fallback rather than a rough guess.
+    """
+    best = None
+    for player in players or []:
+        value = coerce_season(player.get("class"))
+        if value is not None and (best is None or value > best):
+            best = value
+    return best
+
+
+def current_season(players: list | None = None) -> int | None:
+    payload = get(CURRENT_SEASON_URL)
+    print(f"  getCurrentSeason returned: {str(payload)[:120]}")
+    season = coerce_season(payload)
+    if season is not None:
+        return season
+    print("  Could not parse that; falling back to the highest draft class.")
+    return season_from_players(players or [])
 
 
 def season_boundaries(latest: int) -> dict[int, str]:
@@ -139,9 +179,16 @@ def build_season_lookup(starts: dict[int, str]):
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    latest = current_season()
+    players = get(PLAYERS_URL, {"active": "true"})
+    if not players:
+        print("Could not read the player list; aborting.", file=sys.stderr)
+        return 1
+    print(f"{len(players)} active players to fetch")
+
+    latest = current_season(players)
     if latest is None:
-        print("Could not read the current season; aborting.", file=sys.stderr)
+        print("Could not determine the current season from either the endpoint "
+              "or the player data; aborting.", file=sys.stderr)
         return 1
     print(f"Current season: S{latest}")
 
@@ -151,12 +198,6 @@ def main() -> int:
         print("No season boundaries resolved; aborting.", file=sys.stderr)
         return 1
     season_of = build_season_lookup(starts)
-
-    players = get(PLAYERS_URL, {"active": "true"})
-    if not players:
-        print("Could not read the player list; aborting.", file=sys.stderr)
-        return 1
-    print(f"{len(players)} active players to fetch")
 
     rows: list[dict] = []
     ok = missing = 0
