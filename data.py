@@ -727,22 +727,59 @@ def fetch_current_season() -> tuple[int | None, Notice | None]:
             "seen in the player data, which is the same number in practice.",
         )
 
+    season = _coerce_season(payload)
+    if season is not None:
+        return season, None
+
+    # Report what actually came back rather than just saying it was odd — that
+    # is the difference between a fixable one-line change and a guessing game.
+    return None, Notice(
+        "info", "The current-season endpoint returned an unexpected shape",
+        f"Got {type(payload).__name__}: {str(payload)[:160]}. Falling back to "
+        "the highest draft class in the player data, which is the same number "
+        "in practice.",
+    )
+
+
+def _coerce_season(payload, depth: int = 0) -> int | None:
+    """
+    Pull a season number out of whatever shape the endpoint returns.
+
+    Handles a bare number, a quoted number, "S27", a dict under any of the
+    usual key names, a single-key dict, and a list wrapping any of those.
+    """
+    if depth > 3 or payload is None:
+        return None
+
+    if isinstance(payload, bool):
+        return None
+    if isinstance(payload, (int, float)):
+        value = int(payload)
+        return value if 0 < value < 1000 else None
+
+    if isinstance(payload, str):
+        match = re.search(r"\d+", payload)
+        if match:
+            value = int(match.group())
+            return value if 0 < value < 1000 else None
+        return None
+
+    if isinstance(payload, list):
+        for item in payload[:3]:
+            found = _coerce_season(item, depth + 1)
+            if found is not None:
+                return found
+        return None
+
     if isinstance(payload, dict):
-        for key in ("season", "Season", "currentSeason", "current_season"):
+        for key in ("season", "Season", "currentSeason", "current_season",
+                    "SeasonNumber", "seasonNumber", "value", "data", "result"):
             if key in payload:
-                try:
-                    return int(payload[key]), None
-                except (TypeError, ValueError):
-                    pass
-        if len(payload) == 1:
-            try:
-                return int(next(iter(payload.values()))), None
-            except (TypeError, ValueError):
-                pass
-    try:
-        return int(payload), None
-    except (TypeError, ValueError):
-        return None, Notice(
-            "info", "The current-season endpoint returned an unexpected shape",
-            "Falling back to the highest draft class in the player data.",
-        )
+                found = _coerce_season(payload[key], depth + 1)
+                if found is not None:
+                    return found
+        for value in list(payload.values())[:5]:
+            found = _coerce_season(value, depth + 1)
+            if found is not None:
+                return found
+    return None
