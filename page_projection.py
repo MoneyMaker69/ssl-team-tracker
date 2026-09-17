@@ -372,37 +372,62 @@ def _player(ctx, rates) -> None:
         )
 
     path = summary["path"].head(ctx.horizon + 1)
+
+    logged = projection.reconstruct_history(
+        _history_for(ctx, name), float(player["tpe"]), ctx.current_season
+    )["peaks"]
+
+    # Plotly orders a categorical axis by first appearance across traces, so
+    # adding history after the projection puts the past to the RIGHT of the
+    # future. Pin the order explicitly instead.
+    all_seasons = sorted(set(logged) | set(int(v) for v in path["season_num"]))
+    labels = [f"S{s_}" for s_ in all_seasons]
+
     fig = go.Figure()
+    if logged:
+        past_seasons = sorted(logged)
+        fig.add_trace(go.Scatter(
+            x=[f"S{s_}" for s_ in past_seasons],
+            y=[logged[s_] for s_ in past_seasons],
+            mode="lines+markers", name="Actual (from logs)",
+            line=dict(color=config.COLORS["text_muted"], width=2),
+        ))
     fig.add_trace(go.Scatter(
         x=path["Season"], y=path["End of season"], mode="lines+markers",
         line=dict(color=config.COLORS["primary"], width=3),
-        name="End of season (pre-regression)",
+        name="Projected, end of season",
     ))
-    fig.add_trace(go.Scatter(
-        x=path["Season"], y=path["Next season"], mode="lines+markers",
-        line=dict(color=config.COLORS["blue"], width=2, dash="dot"),
-        name="After regression",
-    ))
-    if past:
-        history = projection.reconstruct_history(
-            _history_for(ctx, name), float(player["tpe"]), ctx.current_season
-        )["peaks"]
-        if history:
-            seasons = sorted(history)
-            fig.add_trace(go.Scatter(
-                x=[f"S{s_}" for s_ in seasons],
-                y=[history[s_] for s_ in seasons],
-                mode="lines+markers", name="Logged (actual)",
-                line=dict(color=config.COLORS["text_muted"], width=2),
-            ))
+    if path["Lost"].max() > 0:
+        fig.add_trace(go.Scatter(
+            x=path["Season"], y=path["Next season"], mode="lines+markers",
+            line=dict(color=config.COLORS["blue"], width=2, dash="dot"),
+            name="Projected, after regression",
+        ))
+
     fig.add_hline(
         y=look["peak_tpe"], line_dash="dot",
         line_color=config.COLORS["amber"],
         annotation_text=f"peak {look['peak_tpe']:,.0f}",
     )
-    fig.update_layout(title=f"{name} — projected TPE", height=420,
-                      yaxis_title="TPE")
+    # Divider between what happened and what is forecast.
+    if logged and ctx.current_season in all_seasons:
+        fig.add_vline(
+            x=all_seasons.index(ctx.current_season) - 0.5,
+            line_dash="dot", line_color=config.COLORS["line"],
+            annotation_text="today", annotation_position="top",
+        )
+
+    fig.update_xaxes(categoryorder="array", categoryarray=labels)
+    fig.update_layout(
+        title=f"{name} — actual and projected TPE", height=440,
+        yaxis_title="TPE", hovermode="x unified",
+    )
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Each point is TPE at a season's end, just before regression. Grey is "
+        "reconstructed from logged events; green is projected forward at the "
+        "measured rate; blue is what is left after each regression lands."
+    )
     st.dataframe(path.drop(columns="season_num"),
                  use_container_width=True, hide_index=True)
 
