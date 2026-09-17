@@ -25,15 +25,21 @@ _C = config.COLORS
 
 _CSS_TEMPLATE = """
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=block');
 
 .stApp { background: $bg; }
 
 /* Scoped deliberately narrowly. A broad selector such as [class*="st-"] also
 matches Streamlit's Material icon spans and overrides their icon font, which
 makes icons render as their literal ligature names ("check_circle"). */
-.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div,
-.stApp input, .stApp textarea, .stApp select, .stApp button {
+/* Set on the container only and let inheritance carry it. Enumerating span
+and div reaches Streamlit's own icon elements and overrides their icon font,
+which makes icons render as their literal ligature names ("warning"). */
+.stApp {
 font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+.stApp input, .stApp textarea, .stApp select, .stApp button {
+font-family: inherit;
 }
 
 /* Belt and braces: never let the rule above reach an icon glyph. */
