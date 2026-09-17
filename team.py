@@ -106,6 +106,7 @@ class Context:
     attrition: float = config.DEFAULT_ATTRITION
     draftees: int = config.DEFAULT_DRAFTEES_PER_SEASON
     draftee_tpe: int = config.DEFAULT_DRAFTEE_ENTRY_TPE
+    season_remaining: float = 0.5     # of the current season, for step-1 earnings
     color_map: dict = field(default_factory=dict)
 
 
@@ -283,6 +284,11 @@ def main() -> None:
     )
     if season_notice:
         history_notices = list(history_notices) + [season_notice]
+    # Current TPE already contains this season's earnings to date, so the first
+    # projected step must only add what is left of it.
+    season_left = projection.season_remaining(
+        history_meta.get("season_starts"), current_season
+    )
     rates = projection.measure_rates(
         tpe_history, current_season, window=rate_window,
         generated_at=history_meta.get("generated_at"),
@@ -311,6 +317,7 @@ def main() -> None:
         attrition=attrition,
         draftees=draftees,
         draftee_tpe=draftee_tpe,
+        season_remaining=season_left,
         color_map=color_map,
     )
 

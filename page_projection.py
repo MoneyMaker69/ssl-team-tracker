@@ -64,6 +64,7 @@ def _org_assumptions(ctx) -> projection.OrgAssumptions:
         attrition=ctx.attrition,
         draftees_per_season=ctx.draftees,
         draftee_entry_tpe=ctx.draftee_tpe,
+        first_step_fraction=ctx.season_remaining,
         trials=config.MONTE_CARLO_TRIALS,
     )
 
@@ -207,7 +208,8 @@ def _org(ctx, rates) -> None:
         live = not bool(player.get("user_inactive", False))
         rate = rates.rate_for(name) if live else 0.0
         summary = projection.peak_summary(
-            float(player["tpe"]), cls, rate, ctx.current_season
+            float(player["tpe"]), cls, rate, ctx.current_season,
+            first_step_fraction=ctx.season_remaining,
         )
         rows.append({
             "Player": name,
@@ -262,7 +264,8 @@ def _player(ctx, rates) -> None:
     rate = rates.rate_for(name) if live else 0.0
 
     summary = projection.peak_summary(
-        float(player["tpe"]), cls, rate, ctx.current_season
+        float(player["tpe"]), cls, rate, ctx.current_season,
+        first_step_fraction=ctx.season_remaining,
     )
 
     cols = st.columns(5)
@@ -289,13 +292,15 @@ def _player(ctx, rates) -> None:
 
     if summary["current_regression"] > 0:
         st.caption(
-            f"Regressing {summary['current_regression']:.0%} this season, "
-            f"{summary['next_regression']:.0%} next."
+            f"Regresses {summary['current_regression']:.0%} at the end of "
+            f"S{ctx.current_season}, then {summary['next_regression']:.0%} at "
+            f"the end of S{ctx.current_season + 1}."
         )
     else:
         first = config.REGRESSION_FIRST_SEASON - summary["career_season"]
         st.caption(
-            f"No regression yet — first hit in {first} season(s), at "
+            f"No regression yet — first hit at the end of "
+            f"S{ctx.current_season + first}, at "
             f"{config.REGRESSION_SCHEDULE[config.REGRESSION_FIRST_SEASON]:.0%}."
         )
 

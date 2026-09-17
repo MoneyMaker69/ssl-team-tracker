@@ -126,6 +126,12 @@ depends on it.
 rising 5 points a season to a 40% cap at season 14+. Career season is
 `current_season - class + 1`, so a S13 draftee is in season 8 during S20.
 
+Timing matters and is easy to get wrong. Regression happens **at the end of a
+season**, and the rate charged is the one for the season that just finished —
+not the one being entered. A class-S20 player is in career season 8 during S27,
+so he takes his first hit of 10% at the end of S27, and 15% at the end of S28.
+The academy year sits before career season 1 and doesn't count toward it.
+
 **Earning is measured, never assumed.** Each player's rate is the mean TPE they
 actually logged per complete season, over a configurable window. Rates are held
 fixed across the horizon by choice — no decay toward the mean.

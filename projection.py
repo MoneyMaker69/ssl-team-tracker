@@ -73,6 +73,45 @@ def theoretical_max_season() -> int:
     return config.WEEKS_PER_SEASON * (config.AC_PER_WEEK + config.PT_PER_WEEK)
 
 
+def season_remaining(
+    season_starts: dict | None, current_season: int, today=None
+) -> float:
+    """
+    Fraction of the current season still to be played, 0 to 1.
+
+    Current TPE already includes whatever has been banked this season, so
+    adding a full season's earnings to reach next season would double-count.
+    Falls back to half a season when the dates aren't available.
+    """
+    from datetime import datetime
+
+    if not season_starts:
+        return 0.5
+    key = str(current_season)
+    start_text = season_starts.get(key) or season_starts.get(current_season)
+    if not start_text:
+        return 0.5
+    try:
+        start = datetime.strptime(str(start_text)[:10], "%Y-%m-%d")
+    except ValueError:
+        return 0.5
+
+    # Season length from the median gap between known starts, so this keeps
+    # working if the league changes its schedule.
+    parsed = []
+    for value in season_starts.values():
+        try:
+            parsed.append(datetime.strptime(str(value)[:10], "%Y-%m-%d"))
+        except ValueError:
+            continue
+    parsed.sort()
+    gaps = [(b - a).days for a, b in zip(parsed, parsed[1:]) if 20 < (b - a).days < 200]
+    length = sorted(gaps)[len(gaps) // 2] if gaps else 62
+
+    elapsed = ((today or datetime.now()) - start).days
+    return min(1.0, max(0.0, 1.0 - elapsed / length))
+
+
 # ---------------------------------------------------------------------------
 # Measured earning rates
 # ---------------------------------------------------------------------------
@@ -150,6 +189,7 @@ def project_player(
     rate: float,
     current_season: int,
     horizon: int = 5,
+    first_step_fraction: float = 1.0,
 ) -> pd.DataFrame:
     """
     Roll one player forward.
@@ -172,8 +212,15 @@ def project_player(
         season = current_season + step
         number = career_season(season, draft_class)
         if step:
-            value += rate
-            loss = value * regression_rate(number)
+            # Earnings for the season just finished, scaled on the first step
+            # because we are already partway through the current season and the
+            # TPE we started from includes what has been banked so far.
+            value += rate * (first_step_fraction if step == 1 else 1.0)
+            # The regression charged on entering `season` is the one for the
+            # season that just ENDED. A player in career season 8 during S27
+            # takes the season-8 rate at the end of S27, not season 9's.
+            finished = career_season(season - 1, draft_class)
+            loss = value * regression_rate(finished)
             value -= loss
         else:
             loss = 0.0
@@ -182,14 +229,17 @@ def project_player(
             "season_num": season,
             "Career season": number,
             "TPE": round(value, 1),
-            "Regression": f"{regression_rate(number):.0%}" if number >= config.REGRESSION_FIRST_SEASON else "—",
-            "Lost": round(loss, 1),
+            "Regression at end": (f"{regression_rate(number):.0%}"
+                                  if number >= config.REGRESSION_FIRST_SEASON
+                                  else "—"),
+            "Lost entering": round(loss, 1),
         })
     return pd.DataFrame(rows)
 
 
 def peak_summary(
-    tpe: float, draft_class: int, rate: float, current_season: int
+    tpe: float, draft_class: int, rate: float, current_season: int,
+    first_step_fraction: float = 1.0,
 ) -> dict:
     """
     Where this player tops out, and how long they stay useful.
@@ -198,7 +248,8 @@ def peak_summary(
     horizon here is deliberately longer than the dashboard's display window.
     """
     number_now = career_season(current_season, draft_class)
-    path = project_player(tpe, draft_class, rate, current_season, horizon=18)
+    path = project_player(tpe, draft_class, rate, current_season, horizon=18,
+                          first_step_fraction=first_step_fraction)
 
     best = path.loc[path["TPE"].idxmax()]
     peak_season = int(best["season_num"])
@@ -240,6 +291,7 @@ class OrgAssumptions:
     draftees_per_season: int = 2
     draftee_entry_tpe: int = 420     # 250 start + one academy season
     retiring_is_certain: bool = True
+    first_step_fraction: float = 1.0
     trials: int = 300
 
 
@@ -300,8 +352,13 @@ def project_org(
                         if rng.random() < hazard:
                             p["live"] = False
                             p["rate"] = 0.0
-                    p["tpe"] += p["rate"]
-                    p["tpe"] -= p["tpe"] * regression_rate(number)
+                    p["tpe"] += p["rate"] * (
+                        assumptions.first_step_fraction if step == 1 else 1.0
+                    )
+                    # Charge the season just finished, not the one being entered.
+                    p["tpe"] -= p["tpe"] * regression_rate(
+                        career_season(season - 1, p["cls"])
+                    )
                     # Career over once regression has hollowed them out.
                     if number <= config.MAX_CAREER_SEASON:
                         survivors.append(p)
