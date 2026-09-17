@@ -101,6 +101,7 @@ class Context:
     roster_label: str
     current_season: int
     rates: object = None              # projection.RateTable
+    tpe_history: pd.DataFrame | None = None   # per-season logged TPE
     history_notices: list = field(default_factory=list)
     horizon: int = config.DEFAULT_HORIZON
     attrition: float = config.DEFAULT_ATTRITION
@@ -312,6 +313,7 @@ def main() -> None:
         roster_label=roster_scope,
         current_season=current_season,
         rates=rates,
+        tpe_history=tpe_history,
         history_notices=history_notices,
         horizon=horizon,
         attrition=attrition,

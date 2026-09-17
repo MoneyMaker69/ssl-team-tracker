@@ -179,6 +179,91 @@ def measure_rates(
 
 
 # ---------------------------------------------------------------------------
+# Historical reconstruction
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_history(
+    rows: pd.DataFrame, current_tpe: float, current_season: int
+) -> dict:
+    """
+    Rebuild a player's past end-of-season TPE from their logged events.
+
+    Worked backwards from today, because today's TPE is the one figure we know
+    exactly. Within a season a player earns, then regresses:
+
+        start(S) + earned(S) = pre(S)          <- the season's high point
+        pre(S)  + regression(S) = start(S+1)   <- regression is stored negative
+
+    so going backwards, pre(S) = start(S+1) - regression(S), and
+    start(S) = pre(S) - earned(S).
+
+    The regression figures are exact amounts from the log, which is what makes
+    this reliable: a peak is always immediately before a regression, so each
+    peak candidate is anchored to a number we did not have to estimate.
+
+    Returns {"peaks": {season: pre_regression_tpe}, "earliest": int|None,
+             "complete": bool} where `complete` says whether the logs reach
+    back to the player's first season or are truncated by the portal migration.
+    """
+    result = {"peaks": {}, "earliest": None, "complete": False}
+    if rows is None or rows.empty:
+        return result
+
+    earned = {int(r.season): float(r.earned) for r in rows.itertuples()}
+    regressed = {
+        int(r.season): float(getattr(r, "regression", 0) or 0)
+        for r in rows.itertuples()
+    }
+    seasons = sorted(earned)
+    if not seasons:
+        return result
+
+    earliest = seasons[0]
+    # Current TPE already includes what has been banked this season, so strip it
+    # to get the figure the player started the season with.
+    start = current_tpe - earned.get(current_season, 0.0)
+
+    peaks: dict[int, float] = {}
+    for season in range(current_season - 1, earliest - 1, -1):
+        # regression is negative in the log, so subtracting adds it back on
+        pre = start - regressed.get(season, 0.0)
+        peaks[season] = round(pre, 1)
+        start = pre - earned.get(season, 0.0)
+
+    result["peaks"] = peaks
+    result["earliest"] = earliest
+    return result
+
+
+def career_peak(
+    rows: pd.DataFrame, current_tpe: float, current_season: int,
+    draft_class: int,
+) -> dict | None:
+    """
+    A player's highest recorded end-of-season TPE, and when it happened.
+
+    Returns None when there is no usable history. `truncated` is True when the
+    logs start after the player's first season — the portal migration in S16
+    means anyone drafted earlier has an incomplete record, and their real peak
+    may predate it.
+    """
+    history = reconstruct_history(rows, current_tpe, current_season)
+    peaks = history["peaks"]
+    if not peaks:
+        return None
+    season = max(peaks, key=peaks.get)
+    earliest = history["earliest"]
+    return {
+        "tpe": peaks[season],
+        "season": season,
+        "career_season": career_season(season, draft_class),
+        "truncated": earliest is not None and earliest > draft_class,
+        "earliest_logged": earliest,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Single-player projection
 # ---------------------------------------------------------------------------
 

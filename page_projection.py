@@ -58,6 +58,53 @@ def render(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _history_for(ctx, name: str):
+    """That player's logged seasons, or None if they aren't in the cache."""
+    history = ctx.tpe_history
+    if history is None or history.empty or "name" not in history.columns:
+        return None
+    rows = history[history["name"].astype(str) == name]
+    return rows if not rows.empty else None
+
+
+def _outlook(ctx, name: str, tpe: float, cls: int, rate: float) -> dict:
+    """
+    Combine what actually happened with what is projected.
+
+    Reporting only the forward projection makes every declining player look
+    like they "peak at the end of this season", which is true and useless — for
+    someone already in decline the highest point remaining is always now. The
+    logged career peak is what makes the number mean something.
+    """
+    forward = projection.peak_summary(
+        tpe, cls, rate, ctx.current_season,
+        first_step_fraction=ctx.season_remaining,
+    )
+    past = projection.career_peak(
+        _history_for(ctx, name), tpe, ctx.current_season, cls
+    )
+
+    if past and past["tpe"] > forward["peak_tpe"]:
+        drop = 1 - (tpe / past["tpe"]) if past["tpe"] else 0
+        return {
+            "peak_tpe": past["tpe"],
+            "peaked": f"S{past['season']}" + (" or earlier" if past["truncated"] else ""),
+            "vs_peak": f"-{drop:.0%}",
+            "status": "Past peak",
+            "forward": forward,
+            "past": past,
+        }
+    return {
+        "peak_tpe": forward["peak_tpe"],
+        "peaked": f"end of S{forward['peak_season']}",
+        "vs_peak": "at peak" if forward["peaks_this_season"] else "rising",
+        "status": ("Peaks this season" if forward["peaks_this_season"]
+                   else f"{forward['seasons_to_peak']} season(s) of growth"),
+        "forward": forward,
+        "past": past,
+    }
+
+
 def _org_assumptions(ctx) -> projection.OrgAssumptions:
     return projection.OrgAssumptions(
         horizon=ctx.horizon,
@@ -207,20 +254,19 @@ def _org(ctx, rates) -> None:
         cls = int(player["season_num"])
         live = not bool(player.get("user_inactive", False))
         rate = rates.rate_for(name) if live else 0.0
-        summary = projection.peak_summary(
-            float(player["tpe"]), cls, rate, ctx.current_season,
-            first_step_fraction=ctx.season_remaining,
-        )
+        look = _outlook(ctx, name, float(player["tpe"]), cls, rate)
         rows.append({
             "Player": name,
             "Team": player["team"],
             "Class": player["class"],
-            "Career season": summary["career_season"],
+            "Career season": look["forward"]["career_season"],
             "TPE": int(player["tpe"]),
             "Rate": round(rate),
-            "Peak TPE": round(summary["peak_tpe"]),
-            "Peak at": f"end of S{summary['peak_season']}",
-            "Regression now": f"{summary['current_regression']:.0%}",
+            "Peak TPE": round(look["peak_tpe"]),
+            "Peaked": look["peaked"],
+            "vs peak": look["vs_peak"],
+            "Outlook": look["status"],
+            "Regresses": f"{look['forward']['current_regression']:.0%}",
             "Measured": "yes" if rates.is_measured(name) else "assumed",
         })
 
@@ -229,13 +275,13 @@ def _org(ctx, rates) -> None:
         st.dataframe(frame, use_container_width=True, hide_index=True)
         ui.download(frame, f"ssl_player_peaks_{org}.csv")
 
-        peaking_now = frame[frame["Peak at"] == f"end of S{ctx.current_season}"]
-        if not peaking_now.empty:
-            st.caption(
-                f"{len(peaking_now)} of {len(frame)} players top out at the end "
-                f"of this season and decline from S{ctx.current_season + 1} on, "
-                f"holding {peaking_now['TPE'].sum():,} TPE between them."
-            )
+        past = frame[frame["Outlook"] == "Past peak"]
+        growing = frame[frame["Outlook"].str.contains("growth", na=False)]
+        st.caption(
+            f"{len(past)} of {len(frame)} players are already past their career "
+            f"peak, holding {past['TPE'].sum():,} TPE. {len(growing)} still "
+            "have growth ahead."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -263,19 +309,29 @@ def _player(ctx, rates) -> None:
     measured = rates.is_measured(name)
     rate = rates.rate_for(name) if live else 0.0
 
-    summary = projection.peak_summary(
-        float(player["tpe"]), cls, rate, ctx.current_season,
-        first_step_fraction=ctx.season_remaining,
-    )
+    look = _outlook(ctx, name, float(player["tpe"]), cls, rate)
+    summary = look["forward"]
+    past = look["past"]
 
     cols = st.columns(5)
     cols[0].metric("TPE now", f"{int(player['tpe']):,}")
     cols[1].metric("Career season", summary["career_season"])
     cols[2].metric("Earning rate", f"{rate:,.0f}/szn")
-    cols[3].metric("Peak TPE", f"{summary['peak_tpe']:,.0f}")
-    cols[4].metric("Peaks at", f"end of S{summary['peak_season']}")
+    cols[3].metric("Peak TPE", f"{look['peak_tpe']:,.0f}")
+    cols[4].metric("Peaked", look["peaked"])
 
-    if summary["peaks_this_season"]:
+    if look["status"] == "Past peak":
+        st.caption(
+            f"Career high of {past['tpe']:,.0f} came in S{past['season']} "
+            f"(career season {past['career_season']}) and they are "
+            f"{look['vs_peak'].lstrip('-')} below it now. The best they can "
+            f"still reach is {summary['peak_tpe']:,.0f} at the end of "
+            f"S{summary['peak_season']}."
+            + (" Logs only reach back to S" + str(past["earliest_logged"])
+               + ", so the true high may be earlier and higher."
+               if past["truncated"] else "")
+        )
+    elif summary["peaks_this_season"]:
         st.caption(
             f"Still climbing for the rest of S{ctx.current_season} — the high "
             f"point is {summary['peak_tpe']:,.0f} at season's end, before the "
@@ -284,7 +340,8 @@ def _player(ctx, rates) -> None:
     else:
         st.caption(
             f"{summary['seasons_to_peak']} more season(s) of growth, topping "
-            f"out at {summary['peak_tpe']:,.0f}."
+            f"out at {summary['peak_tpe']:,.0f} at the end of "
+            f"S{summary['peak_season']}."
         )
 
     if not live:
@@ -326,10 +383,22 @@ def _player(ctx, rates) -> None:
         line=dict(color=config.COLORS["blue"], width=2, dash="dot"),
         name="After regression",
     ))
+    if past:
+        history = projection.reconstruct_history(
+            _history_for(ctx, name), float(player["tpe"]), ctx.current_season
+        )["peaks"]
+        if history:
+            seasons = sorted(history)
+            fig.add_trace(go.Scatter(
+                x=[f"S{s_}" for s_ in seasons],
+                y=[history[s_] for s_ in seasons],
+                mode="lines+markers", name="Logged (actual)",
+                line=dict(color=config.COLORS["text_muted"], width=2),
+            ))
     fig.add_hline(
-        y=summary["peak_tpe"], line_dash="dot",
+        y=look["peak_tpe"], line_dash="dot",
         line_color=config.COLORS["amber"],
-        annotation_text=f"peak {summary['peak_tpe']:,.0f}",
+        annotation_text=f"peak {look['peak_tpe']:,.0f}",
     )
     fig.update_layout(title=f"{name} — projected TPE", height=420,
                       yaxis_title="TPE")
