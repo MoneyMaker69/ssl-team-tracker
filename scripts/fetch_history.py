@@ -52,9 +52,15 @@ SEASON_LEAD_DAYS = 7  # matchday 1 is ~a week after a season actually opens
 #   "Weekly PT #207 Correction"    -6  — negative, but not regression
 REGRESSION_RE = re.compile(r"^S\d+\s+Regression$", re.IGNORECASE)
 
-# The portal migration seeded everyone with a lump "Initial TPE" entry. It is a
-# snapshot of TPE already held, not TPE earned, and must never count as earnings.
-EXCLUDED_SOURCES = {"initial tpe"}
+# Two kinds of lump sum are TPE *received*, not earned, and must never count as
+# earnings: the portal migration snapshot, and the grant every player is created
+# with (350 for classes up to S23, 250 from S24). Matched loosely because the
+# exact wording has varied.
+EXCLUDED_SOURCE_PATTERNS = re.compile(
+    r"initial\s*tpe|player\s*creation|created\s*player|starting\s*tpe"
+    r"|creation\s*tpe|new\s*player",
+    re.IGNORECASE,
+)
 
 
 def get(url: str, params: dict | None = None):
@@ -233,8 +239,8 @@ def main() -> int:
 
             if REGRESSION_RE.match(source) and change < 0:
                 regressed[season] += change
-            elif source.lower() in EXCLUDED_SOURCES:
-                continue  # migration snapshot, not earnings
+            elif EXCLUDED_SOURCE_PATTERNS.search(source):
+                continue  # creation grant or migration snapshot, not earnings
             else:
                 earned[season] += change
                 events[season] += 1
