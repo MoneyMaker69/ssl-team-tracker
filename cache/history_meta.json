@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-12T14:50:51+00:00",
+  "generated_at": "2026-10-19T12:34:44+00:00",
   "current_season": 27,
   "season_starts": {
     "1": "2021-11-30",
@@ -32,5 +32,5 @@
   },
   "players_fetched": 545,
   "players_missing": 1,
-  "rows": 2659
+  "rows": 2660
 }
